@@ -1,0 +1,8 @@
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: MultiKueueConfig
+metadata:
+  name: multikueue-config
+spec:
+  clusters:
+    - worker-east1-cluster
+    - worker-west3-cluster

@@ -1,0 +1,18 @@
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: gpu-cluster-queue
+spec:
+  namespaceSelector: {}
+  preemption:
+    withinClusterQueue: LowerPriority
+    reclaimWithinCohort: Any
+  admissionChecks:
+    - multikueue-check
+  resourceGroups:
+    - coveredResources: ["nvidia.com/gpu"]
+      flavors:
+        - name: rtx-pro-6000
+          resources:
+            - name: "nvidia.com/gpu"
+              nominalQuota: 8

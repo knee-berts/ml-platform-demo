@@ -1,0 +1,305 @@
+# Source: inferencepool/templates/gke.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm-llama3-8b-instruct-metrics-reader-sa
+  namespace: inference-server
+---
+# Source: inferencepool/templates/rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm-llama3-8b-instruct-epp
+  namespace: inference-server
+  labels:
+    app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
+    app.kubernetes.io/version: "v1.1.0"
+---
+# Source: inferencepool/templates/gke.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vllm-llama3-8b-instruct-metrics-reader-secret
+  namespace: inference-server
+  labels:
+    app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
+    app.kubernetes.io/version: "v1.1.0"
+  annotations:
+    kubernetes.io/service-account.name: vllm-llama3-8b-instruct-metrics-reader-sa
+type: kubernetes.io/service-account-token
+---
+# Source: inferencepool/templates/epp-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-llama3-8b-instruct-epp
+  namespace: inference-server
+data:
+  default-plugins.yaml: |
+    apiVersion: inference.networking.x-k8s.io/v1alpha1
+    kind: EndpointPickerConfig
+    plugins:
+    - type: queue-scorer
+    - type: kv-cache-utilization-scorer
+    - type: prefix-cache-scorer
+    schedulingProfiles:
+    - name: default
+      plugins:
+      - pluginRef: queue-scorer
+      - pluginRef: kv-cache-utilization-scorer
+      - pluginRef: prefix-cache-scorer
+---
+# Source: inferencepool/templates/gke.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: default-vllm-llama3-8b-instruct-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+# Source: inferencepool/templates/rbac.yaml
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: "vllm-llama3-8b-instruct-default-epp"
+  labels:
+    app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
+    app.kubernetes.io/version: "v1.1.0"
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+# Source: inferencepool/templates/gke.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: default-vllm-llama3-8b-instruct-metrics-reader-role-binding
+subjects:
+- kind: ServiceAccount
+  name: vllm-llama3-8b-instruct-metrics-reader-sa
+  namespace: inference-server
+roleRef:
+  kind: ClusterRole
+  name: default-vllm-llama3-8b-instruct-metrics-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+# Source: inferencepool/templates/rbac.yaml
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: "vllm-llama3-8b-instruct-default-epp"
+subjects:
+- kind: ServiceAccount
+  name: vllm-llama3-8b-instruct-epp
+  namespace: inference-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: "vllm-llama3-8b-instruct-default-epp"
+---
+# Source: inferencepool/templates/gke.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vllm-llama3-8b-instruct-metrics-reader-secret-read
+rules:
+- resources:
+  - secrets
+  apiGroups: [""]
+  verbs: ["get", "list", "watch"]
+  resourceNames: ["vllm-llama3-8b-instruct-metrics-reader-secret"]
+---
+# Source: inferencepool/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vllm-llama3-8b-instruct-epp
+  namespace: inference-server
+  labels:
+    app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
+    app.kubernetes.io/version: "v1.1.0"
+rules:
+- apiGroups: ["inference.networking.x-k8s.io"]
+  resources: ["inferenceobjectives"]
+  verbs: ["get", "watch", "list"]
+- apiGroups: ["inference.networking.k8s.io"]
+  resources: ["inferencepools"]
+  verbs: ["get", "watch", "list"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "watch", "list"]
+---
+# Source: inferencepool/templates/gke.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gmp-system:collector:default-vllm-llama3-8b-instruct-metrics-reader-secret-read
+  namespace: inference-server
+roleRef:
+  name: vllm-llama3-8b-instruct-metrics-reader-secret-read
+  kind: Role
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+- name: collector
+  namespace: gmp-system
+  kind: ServiceAccount
+---
+# Source: inferencepool/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vllm-llama3-8b-instruct-epp
+  namespace: inference-server
+subjects:
+- kind: ServiceAccount
+  name: vllm-llama3-8b-instruct-epp
+  namespace: inference-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vllm-llama3-8b-instruct-epp
+---
+# Source: inferencepool/templates/epp-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-llama3-8b-instruct-epp
+  namespace: inference-server
+  labels:
+    app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
+    app.kubernetes.io/version: "v1.1.0"
+spec:
+  selector:
+    inferencepool: vllm-llama3-8b-instruct-epp
+  ports:
+    - name: grpc-ext-proc
+      protocol: TCP
+      port: 9002
+    - name: http-metrics
+      protocol: TCP
+      port: 9090
+  type: ClusterIP
+---
+# Source: inferencepool/templates/epp-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-llama3-8b-instruct-epp
+  namespace: inference-server
+  labels:
+    app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
+    app.kubernetes.io/version: "v1.1.0"
+spec:
+  replicas: 1
+  strategy:
+    # The current recommended EPP deployment pattern is to have a single active replica. This ensures 
+    # optimal performance of the stateful operations such prefix cache aware scorer.
+    # The Recreate strategy the old replica is killed immediately, and allow the new replica(s) to 
+    # quickly take over. This is particularly important in the high availability set up with leader
+    # election, as the rolling update strategy would prevent the old leader being killed because 
+    # otherwise the maxUnavailable would be 100%.
+    type: Recreate
+  selector:
+    matchLabels:
+      inferencepool: vllm-llama3-8b-instruct-epp
+  template:
+    metadata:
+      labels:
+        inferencepool: vllm-llama3-8b-instruct-epp
+    spec:
+      serviceAccountName: vllm-llama3-8b-instruct-epp
+      # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
+      terminationGracePeriodSeconds: 130
+      containers:
+      - name: epp
+        image: registry.k8s.io/gateway-api-inference-extension/epp:v1.1.0
+        imagePullPolicy: Always
+        args:
+        - --pool-name
+        - vllm-llama3-8b-instruct
+        # The pool namespace is optional because EPP can default to the NAMESPACE env var.
+        # We still keep this here so that the template works with older versions of EPP, or other
+        # distros of EPP which may not have implemented the NAMESPACE env var defaulting behavior.
+        - --pool-namespace
+        - inference-server
+        - --pool-group
+        - "inference.networking.k8s.io"
+        - --zap-encoder
+        - "json"
+        - --config-file
+        - "/config/default-plugins.yaml"
+        # Pass additional flags via the inferenceExtension.flags field in values.yaml.
+        - "--v"
+        - "1"
+        - "--tracing"
+        - "false"
+        - --metrics-endpoint-auth=false
+        ports:
+        - name: grpc
+          containerPort: 9002
+        - name: grpc-health
+          containerPort: 9003
+        - name: metrics
+          containerPort: 9090
+        livenessProbe:
+          grpc:
+            port: 9003
+            service: inference-extension
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          grpc:
+            port: 9003
+            service: inference-extension
+          periodSeconds: 2
+
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        volumeMounts:
+        - name: plugins-config-volume
+          mountPath: "/config"
+      volumes:
+      - name: plugins-config-volume
+        configMap:
+          name: vllm-llama3-8b-instruct-epp
+---
+# Source: inferencepool/templates/gke.yaml
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: vllm-llama3-8b-instruct
+  namespace: inference-server
+  labels:
+    app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
+    app.kubernetes.io/version: "v1.1.0"
+spec:
+  endpoints:
+  - port: metrics
+    scheme: http
+    interval: 10s
+    path: /metrics
+    authorization:
+      type: Bearer
+      credentials:
+        secret:
+          name: vllm-llama3-8b-instruct-metrics-reader-secret
+          key: token
+  selector:
+    matchLabels:
+        inferencepool: vllm-llama3-8b-instruct-epp

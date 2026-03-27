@@ -1,0 +1,10 @@
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceObjective
+metadata:
+  name: food-review
+  namespace: inference-server
+spec:
+  priority: 10
+  poolRef:
+    name: vllm-llama3-8b-instruct
+    group: "inference.networking.k8s.io"

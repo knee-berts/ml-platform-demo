@@ -1,0 +1,291 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: training-job-1
+  namespace: training-jobs
+  labels:
+    kueue.x-k8s.io/queue-name: training-queue
+    kueue.x-k8s.io/priority-class: training-low
+spec:
+  replicatedJobs:
+    - name: leader
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+              containers:
+                - name: training-sim
+                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
+                  command: ["bash", "-c"]
+                  args:
+                    - |
+                      echo "=== Training Job 1 Leader ==="
+                      nvidia-smi
+                      echo "Simulating distributed training..."
+                      sleep infinity
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+              restartPolicy: Never
+    - name: workers
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+              containers:
+                - name: training-sim
+                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
+                  command: ["bash", "-c"]
+                  args:
+                    - |
+                      echo "=== Training Job 1 Worker ==="
+                      nvidia-smi
+                      echo "Simulating distributed training worker..."
+                      sleep infinity
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+              restartPolicy: Never
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: training-job-2
+  namespace: training-jobs
+  labels:
+    kueue.x-k8s.io/queue-name: training-queue
+    kueue.x-k8s.io/priority-class: training-low
+spec:
+  replicatedJobs:
+    - name: leader
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+              containers:
+                - name: training-sim
+                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
+                  command: ["bash", "-c"]
+                  args:
+                    - |
+                      echo "=== Training Job 2 Leader ==="
+                      nvidia-smi
+                      echo "Simulating distributed training..."
+                      sleep infinity
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+              restartPolicy: Never
+    - name: workers
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+              containers:
+                - name: training-sim
+                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
+                  command: ["bash", "-c"]
+                  args:
+                    - |
+                      echo "=== Training Job 2 Worker ==="
+                      nvidia-smi
+                      echo "Simulating distributed training worker..."
+                      sleep infinity
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+              restartPolicy: Never
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: training-job-3
+  namespace: training-jobs
+  labels:
+    kueue.x-k8s.io/queue-name: training-queue
+    kueue.x-k8s.io/priority-class: training-low
+spec:
+  replicatedJobs:
+    - name: leader
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+              containers:
+                - name: training-sim
+                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
+                  command: ["bash", "-c"]
+                  args:
+                    - |
+                      echo "=== Training Job 3 Leader ==="
+                      nvidia-smi
+                      echo "Simulating distributed training..."
+                      sleep infinity
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+              restartPolicy: Never
+    - name: workers
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+              containers:
+                - name: training-sim
+                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
+                  command: ["bash", "-c"]
+                  args:
+                    - |
+                      echo "=== Training Job 3 Worker ==="
+                      nvidia-smi
+                      echo "Simulating distributed training worker..."
+                      sleep infinity
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+              restartPolicy: Never
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: training-job-4
+  namespace: training-jobs
+  labels:
+    kueue.x-k8s.io/queue-name: training-queue
+    kueue.x-k8s.io/priority-class: training-low
+spec:
+  replicatedJobs:
+    - name: leader
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+              containers:
+                - name: training-sim
+                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
+                  command: ["bash", "-c"]
+                  args:
+                    - |
+                      echo "=== Training Job 4 Leader ==="
+                      nvidia-smi
+                      echo "Simulating distributed training..."
+                      sleep infinity
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+              restartPolicy: Never
+    - name: workers
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+              containers:
+                - name: training-sim
+                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
+                  command: ["bash", "-c"]
+                  args:
+                    - |
+                      echo "=== Training Job 4 Worker ==="
+                      nvidia-smi
+                      echo "Simulating distributed training worker..."
+                      sleep infinity
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+              restartPolicy: Never

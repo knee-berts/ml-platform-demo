@@ -1,0 +1,20 @@
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: my-backend-policy
+  namespace: inference-server
+spec:
+  targetRef:
+    group: "networking.gke.io"
+    kind: GCPInferencePoolImport
+    name: vllm-llama3-8b-instruct
+  default:
+    balancingMode: CUSTOM_METRICS
+    trafficDuration: LONG
+    timeoutSec: 300
+    connectionDraining:
+      drainingTimeoutSec: 130
+    customMetrics:
+      - name: gke.named_metrics.kv-cache
+        dryRun: false
+        maxUtilizationPercent: 60

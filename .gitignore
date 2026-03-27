@@ -1,0 +1,17 @@
+# Internal notes and investigation docs
+ENGINEERING_REPORT.md
+FINDINGS.md
+
+# Claude Code
+CLAUDE.md
+.claude/
+
+# Recordings (cast files, gifs, agg binary)
+recordings/
+
+# Secrets
+workers/secret.yaml
+
+# Python
+__pycache__/
+*.pyc

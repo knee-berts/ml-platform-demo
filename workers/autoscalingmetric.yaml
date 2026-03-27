@@ -1,0 +1,26 @@
+apiVersion: autoscaling.gke.io/v1beta1
+kind: AutoscalingMetric
+metadata:
+  name: gpu-cache
+  namespace: inference-server
+spec:
+  metrics:
+  - pod:
+      selector:
+        matchLabels:
+          app: vllm-llama3-8b-instruct
+      containers:
+      - endpoint:
+          port: 8000
+          path: /metrics
+        metrics:
+        - gauge:
+            name: kv-cache
+            prometheusMetricName: "vllm:kv_cache_usage_perc"
+            loadBalancing:
+              enabled: true
+        - gauge:
+            name: kv-cache-old
+            prometheusMetricName: "vllm:gpu_cache_usage_perc"
+            loadBalancing:
+              enabled: true

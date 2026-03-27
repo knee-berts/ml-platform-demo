@@ -1,0 +1,15 @@
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: inference-queue
+  namespace: inference-server
+spec:
+  clusterQueue: gpu-cluster-queue
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: training-queue
+  namespace: training-jobs
+spec:
+  clusterQueue: gpu-cluster-queue

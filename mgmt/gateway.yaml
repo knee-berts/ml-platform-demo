@@ -1,0 +1,16 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: cross-region-gateway
+  namespace: gateway-system
+spec:
+  gatewayClassName: gke-l7-cross-regional-internal-managed-mc
+  addresses:
+  - type: networking.gke.io/ephemeral-ipv4-address/us-east1
+    value: "us-east1"
+  - type: networking.gke.io/ephemeral-ipv4-address/us-west3
+    value: "us-west3"
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
