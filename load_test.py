@@ -57,6 +57,8 @@ CLUSTER_CONFIGS = {
                  "color": "blue", "label": "🔵 us-west3"},
 }
 
+MGMT_CONTEXT = "mgmt"
+
 
 # ── Data classes ───────────────────────────────────────────────────────────────
 
@@ -160,6 +162,7 @@ class KueueState:
     training_pods: List[dict] = field(default_factory=list)   # {name, status, node, gpu}
     hpa_replicas: Dict[str, Tuple[int, int, int]] = field(default_factory=dict)  # cluster -> (current, desired, max)
     events: List[str] = field(default_factory=list)  # recent preemption/scale events
+    _start_time: float = field(default_factory=time.time)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def update(self, workloads=None, training_pods=None, hpa_replicas=None):
@@ -174,7 +177,13 @@ class KueueState:
     def add_event(self, msg: str):
         with self._lock:
             ts = time.strftime("%H:%M:%S")
-            self.events.append(f"[{ts}] {msg}")
+            elapsed = int(time.time() - self._start_time)
+            mm, ss = divmod(elapsed, 60)
+            if mm > 0:
+                rel = f"{mm}m {ss}s into load test"
+            else:
+                rel = f"{ss}s into load test"
+            self.events.append(f"[{ts} · {rel}] {msg}")
             if len(self.events) > 8:
                 self.events.pop(0)
 
@@ -185,7 +194,10 @@ class KueueCollector(threading.Thread):
         super().__init__(daemon=True)
         self.state = kueue_state
         self._stop = threading.Event()
-        self._prev_workloads: Dict[str, str] = {}  # name -> phase, for detecting transitions
+        self._prev_workloads: set = set()                # {(name, cluster)} for inference workloads
+        self._prev_mgmt_training: Dict[str, dict] = {}   # mgmt workload name -> {evicted, requeued, admitted}
+        self._training_cluster_map: Dict[str, str] = {}   # workload name -> cluster label (for preemption messages)
+        self._pending_reschedules: set = set()             # workloads preempted but not yet placed on a worker
 
     def stop(self):
         self._stop.set()
@@ -304,29 +316,153 @@ class KueueCollector(threading.Thread):
                     pass
         return result
 
+    def _get_mgmt_training_status(self) -> Dict[str, dict]:
+        """Poll mgmt cluster for training workload conditions (Evicted, Requeued).
+
+        Returns {workload_name: {evicted: bool, requeued: bool, admitted: bool, cluster: str}}.
+        The mgmt cluster is the source of truth for preemption — worker workloads
+        just disappear, but mgmt tracks Evicted/Requeued conditions.
+        """
+        jsonpath = (
+            "jsonpath={range .items[*]}{.metadata.name}|"
+            "{range .status.conditions[*]}{.type}={.status},{end}|"
+            "{.status.admission.clusterQueue}"
+            "{\"\\n\"}{end}"
+        )
+        out, rc = kubectl(
+            "get", "workloads", "-n", "training-jobs", "-o", jsonpath,
+            context=MGMT_CONTEXT, timeout=10,
+        )
+        result = {}
+        if rc != 0 or not out:
+            return result
+        for line in out.strip().splitlines():
+            parts = line.split("|")
+            if len(parts) < 2:
+                continue
+            name = parts[0]
+            conds = {}
+            for c in parts[1].split(","):
+                if "=" in c:
+                    k, v = c.split("=", 1)
+                    conds[k] = v
+            result[name] = {
+                "evicted": conds.get("Evicted") == "True",
+                "requeued": conds.get("Requeued") == "True",
+                "admitted": conds.get("Admitted") == "True",
+            }
+        return result
+
     def _detect_events(self, new_workloads: List[KueueWorkload]):
+        # ── Inference events: detect new pods on worker clusters ──
+        new_inf_keys = set()
         for wl in new_workloads:
-            key = (wl.name, wl.cluster)
-            prev_phase = self._prev_workloads.get(key)
-            is_training = wl.namespace == "training-jobs"
-            is_inference = wl.namespace == "inference-server"
-            if prev_phase and prev_phase != wl.phase:
-                if wl.phase == "Evicted" and is_training:
-                    cluster_label = wl.cluster.replace("us-", "")
-                    self.state.add_event(f"PREEMPTED: {wl.name} evicted on {cluster_label}")
-                elif wl.phase == "Admitted" and is_inference:
-                    self.state.add_event(f"SCALED: inference pod admitted")
-                elif wl.phase == "Pending" and prev_phase == "Admitted":
-                    self.state.add_event(f"EVICTED: {wl.name} lost quota")
-            elif prev_phase is None:
-                if wl.phase == "Admitted" and is_inference:
-                    self.state.add_event(f"NEW: inference pod admitted")
-                elif is_training and wl.phase in ("Admitted", "Reserved", "Pending"):
-                    cluster_label = wl.cluster.replace("us-", "")
-                    self.state.add_event(f"RESCHEDULED: {wl.name} → {cluster_label}")
-        self._prev_workloads = {(wl.name, wl.cluster): wl.phase for wl in new_workloads}
+            if wl.namespace == "inference-server":
+                key = (wl.name, wl.cluster)
+                new_inf_keys.add(key)
+                if key not in self._prev_workloads:
+                    evt = f"NEW: inference pod admitted on {wl.cluster.replace('us-', '')}"
+                    self.state.add_event(evt)
+                    with open("/tmp/kueue_events_debug.log", "a") as dbg:
+                        dbg.write(f"  >>> EVENT FIRED: {evt}\n")
+
+        # ── Training events: use mgmt as source of truth ──
+        # Kueue sets Evicted=True briefly then flips to Evicted=False,Requeued=True
+        # after rescheduling. The Evicted=True window is too short to catch reliably.
+        # Requeued=True is sticky — use it to detect both preemption and rescheduling.
+        mgmt_status = self._get_mgmt_training_status()
+        with open("/tmp/kueue_events_debug.log", "a") as dbg:
+            dbg.write(f"\n--- {time.strftime('%Y-%m-%dT%H:%M:%S')} ---\n")
+            dbg.write(f"mgmt_status: {mgmt_status}\n")
+            dbg.write(f"prev_mgmt:   {self._prev_mgmt_training}\n")
+            dbg.write(f"cluster_map: {self._training_cluster_map}\n")
+            dbg.write(f"pending_reschedules: {self._pending_reschedules}\n")
+            dbg.write(f"inf_prev_count: {len(self._prev_workloads)}\n")
+            for n, s in mgmt_status.items():
+                p = self._prev_mgmt_training.get(n, {})
+                dbg.write(f"  {n}: requeued={s.get('requeued')} was_requeued={p.get('requeued', False)}"
+                          f" evicted={s.get('evicted')} admitted={s.get('admitted')}\n")
+            new_inf = [(wl.name, wl.cluster) for wl in new_workloads if wl.namespace == "inference-server"]
+            new_train = [(wl.name, wl.cluster) for wl in new_workloads if wl.namespace == "training-jobs"]
+            dbg.write(f"  inference_workloads({len(new_inf)}): {new_inf}\n")
+            dbg.write(f"  training_workloads({len(new_train)}): {new_train}\n")
+        for name, status in mgmt_status.items():
+            prev = self._prev_mgmt_training.get(name, {})
+            was_requeued = prev.get("requeued", False)
+
+            if status["requeued"] and not was_requeued:
+                short_name = name[:50]
+                # Where was this job before preemption?
+                old_cluster = self._training_cluster_map.get(short_name, "?")
+                evt1 = f"PREEMPTED: {short_name} evicted on {old_cluster}"
+                self.state.add_event(evt1)
+
+                # Where did it get rescheduled to?
+                new_cluster = None
+                for wl in new_workloads:
+                    if wl.namespace == "training-jobs" and wl.name == short_name:
+                        new_cluster = wl.cluster.replace("us-", "")
+                        break
+                # Track for deferred RESCHEDULED event if not placed yet
+                if new_cluster:
+                    evt2 = f"RESCHEDULED: {short_name} → {new_cluster}"
+                    self.state.add_event(evt2)
+                else:
+                    evt2 = f"(pending placement for {short_name})"
+                    self._pending_reschedules.add(short_name)
+
+                with open("/tmp/kueue_events_debug.log", "a") as dbg:
+                    dbg.write(f"  >>> EVENT FIRED: {evt1}\n")
+                    dbg.write(f"  >>> EVENT FIRED: {evt2}\n")
+                    dbg.write(f"  >>> events list now: {self.state.events}\n")
+
+        # Check if any pending reschedules have landed on a worker
+        if self._pending_reschedules:
+            for wl in new_workloads:
+                if wl.namespace == "training-jobs" and wl.name in self._pending_reschedules:
+                    new_cluster = wl.cluster.replace("us-", "")
+                    self.state.add_event(f"RESCHEDULED: {wl.name} → {new_cluster}")
+                    self._pending_reschedules.discard(wl.name)
+
+        # Track which cluster each training job is on (for preemption messages).
+        # Only update if we haven't just processed a requeue for this job —
+        # otherwise the map already has the NEW location before we emit PREEMPTED.
+        requeued_this_poll = set()
+        for name, status in mgmt_status.items():
+            prev = self._prev_mgmt_training.get(name, {})
+            if status.get("requeued") and not prev.get("requeued", False):
+                requeued_this_poll.add(name[:50])
+        for wl in new_workloads:
+            if wl.namespace == "training-jobs" and wl.name not in requeued_this_poll:
+                self._training_cluster_map[wl.name] = wl.cluster.replace("us-", "")
+
+        self._prev_mgmt_training = mgmt_status
+        self._prev_workloads = {
+            (wl.name, wl.cluster) for wl in new_workloads
+            if wl.namespace == "inference-server"
+        }
 
     def run(self):
+        # Truncate debug log at start of each run
+        open("/tmp/kueue_events_debug.log", "w").close()
+        # Seed with current state so pre-existing workloads don't trigger events
+        initial = self._get_workloads()
+        self._prev_workloads = {
+            (wl.name, wl.cluster) for wl in initial
+            if wl.namespace == "inference-server"
+        }
+        # Seed mgmt training status but mark all as not-yet-requeued so we catch
+        # preemptions that happened between load test start and first dashboard poll.
+        mgmt_seed = self._get_mgmt_training_status()
+        self._prev_mgmt_training = {
+            name: {**status, "requeued": False}
+            for name, status in mgmt_seed.items()
+        }
+        for wl in initial:
+            if wl.namespace == "training-jobs":
+                self._training_cluster_map[wl.name] = wl.cluster.replace("us-", "")
+        self.state.update(workloads=initial, training_pods=self._get_training_pods(), hpa_replicas=self._get_hpa())
+
         while not self._stop.wait(METRICS_INTERVAL + 1):
             workloads = self._get_workloads()
             training_pods = self._get_training_pods()
@@ -958,8 +1094,11 @@ class Dashboard:
 
         # Events log
         events_text = Text()
+        # Debug: log what the renderer sees
+        with open("/tmp/kueue_events_debug.log", "a") as dbg:
+            dbg.write(f"  [RENDER] events count={len(events)}, last4={events[-4:] if events else []}\n")
         if events:
-            events_text.append("\n  Recent events:\n", style="bold dim")
+            events_text.append(f"\n  Recent events ({len(events)} total):\n", style="bold dim")
             for ev in events[-4:]:
                 if "PREEMPTED" in ev:
                     events_text.append(f"  {ev}\n", style="bold red")
@@ -1037,7 +1176,7 @@ class Dashboard:
             with self.kueue_state._lock:
                 n_wl = len(self.kueue_state.workloads)
                 n_ev = len(self.kueue_state.events)
-            kueue_rows = max(11, n_wl + n_ev + 8)
+            kueue_rows = max(11, n_wl + max(n_ev, 6) + 14)
 
         layout = Layout()
         layout.split_column(

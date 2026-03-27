@@ -56,9 +56,54 @@ fi
 trap 'kubectl patch hpa vllm-inference-hpa -n inference-server --context '"$TARGET_CTX"' --type=merge -p "{\"spec\":{\"minReplicas\":4,\"maxReplicas\":6}}" 2>/dev/null
 kubectl patch hpa vllm-inference-hpa -n inference-server --context '"$OTHER_CTX"' --type=merge -p "{\"spec\":{\"minReplicas\":4,\"maxReplicas\":4}}" 2>/dev/null' ERR EXIT
 
+remediate_disk_pressure() {
+  # Replace GPU nodes with DiskPressure so pods can schedule on fresh nodes.
+  # Root cause: HF model cache fills the boot disk across pod restarts.
+  echo "--- Checking for DiskPressure on GPU nodes ---"
+  for ctx in worker-east1 worker-west3; do
+    local label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+    for node in $(kubectl get nodes --context $ctx -l cloud.google.com/gke-accelerator=nvidia-rtx-pro-6000 \
+        -o jsonpath='{range .items[*]}{.metadata.name}={.status.conditions[?(@.type=="DiskPressure")].status}{" "}{end}' 2>/dev/null); do
+      name="${node%%=*}"
+      status="${node##*=}"
+      if [ "$status" = "True" ]; then
+        echo "  ⚠ $label/$name has DiskPressure — draining and deleting for replacement"
+        # Force-delete inference pods on this node (they'll hang on graceful shutdown with full disk)
+        kubectl delete pods -n inference-server -l app=vllm-llama3-8b-instruct --context $ctx \
+          --field-selector spec.nodeName=$name --grace-period=0 --force --ignore-not-found 2>/dev/null || true
+        # Cordon + delete (GKE autoscaler will provision a fresh node)
+        kubectl cordon "$name" --context $ctx 2>/dev/null || true
+        kubectl delete node "$name" --context $ctx 2>/dev/null || true
+        echo "  → $label/$name deleted, waiting for GKE to provision replacement..."
+      fi
+    done
+  done
+
+  # If any nodes were replaced, wait for new ones to become Ready
+  for ctx in worker-east1 worker-west3; do
+    local label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+    local expected=2
+    for i in $(seq 1 60); do
+      local ready_count
+      ready_count=$(kubectl get nodes --context $ctx -l cloud.google.com/gke-accelerator=nvidia-rtx-pro-6000 \
+        --no-headers 2>/dev/null | grep -c " Ready" || true)
+      if [ "$ready_count" -ge "$expected" ]; then
+        break
+      fi
+      if [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ]; then
+        echo "  $label: ${ready_count}/${expected} GPU nodes Ready, waiting... (${i}/60)"
+      fi
+      sleep 10
+    done
+  done
+}
+
 reset_loadtest() {
   echo "=== Resetting Load Test (target: $TARGET) ==="
   echo ""
+
+  # Fix unhealthy nodes before anything else
+  remediate_disk_pressure
 
   # Kill any load generator pods
   echo "--- Killing load generators ---"
@@ -90,6 +135,12 @@ reset_loadtest() {
       kubectl delete pods -l app=vllm-llama3-8b-instruct -n inference-server --context $ctx --grace-period=0 --force --ignore-not-found 2>/dev/null || true
       kubectl delete workloads --all -n inference-server --context $ctx --ignore-not-found 2>/dev/null || true
       sleep 5
+      # Restore HPA before scaling back up so it doesn't clamp replicas
+      if [ "$ctx" = "$TARGET_CTX" ]; then
+        kubectl patch hpa vllm-inference-hpa -n inference-server --context $ctx --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":6}}' 2>/dev/null
+      else
+        kubectl patch hpa vllm-inference-hpa -n inference-server --context $ctx --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":4}}' 2>/dev/null
+      fi
       kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --context $ctx --replicas=4
     else
       # Just wait for any terminating pods and clean finished workloads
@@ -108,6 +159,11 @@ reset_loadtest() {
   kubectl rollout status deployment/vllm-llama3-8b-instruct -n inference-server --context worker-east1 --timeout=300s &
   kubectl rollout status deployment/vllm-llama3-8b-instruct -n inference-server --context worker-west3 --timeout=300s &
   wait
+
+  # Restore HPAs to correct values before validation
+  echo "--- Restoring HPAs (target max=6, other max=4) ---"
+  kubectl patch hpa vllm-inference-hpa -n inference-server --context "$TARGET_CTX" --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":6}}' 2>/dev/null
+  kubectl patch hpa vllm-inference-hpa -n inference-server --context "$OTHER_CTX" --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":4}}' 2>/dev/null
 
   # Wait for KV cache to drain
   echo "--- Waiting 15s for KV cache to cool ---"
@@ -157,56 +213,103 @@ reset_multikueue() {
   echo "--- MultiKueue reset complete ---"
 }
 
-show_state() {
-  echo ""
-  echo "=== Validation ==="
+VALIDATION_RETRIES=30       # max attempts (× 10s = 5 minutes)
+VALIDATION_INTERVAL=10      # seconds between retries
 
-  all_ok=true
+validate_environment() {
+  # Returns 0 if ready, 1 if not. Prints per-cluster status.
+  local all_ok=true
+
   for ctx in worker-east1 worker-west3; do
-    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+    local label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+    local errors=""
 
-    # Count inference pods (all states)
+    # ── Node health ──────────────────────────────────────────────
+    local bad_nodes=""
+    bad_nodes=$(kubectl get nodes --context $ctx -l cloud.google.com/gke-accelerator=nvidia-rtx-pro-6000 \
+      -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.conditions[*]}{.type}={.status}{" "}{end}{"\n"}{end}' 2>/dev/null \
+      | while read -r node conds; do
+          for c in $conds; do
+            case "$c" in
+              Ready=True) ;;
+              Ready=*)             echo "$node:NotReady" ;;
+              DiskPressure=True)   echo "$node:DiskPressure" ;;
+              MemoryPressure=True) echo "$node:MemoryPressure" ;;
+              PIDPressure=True)    echo "$node:PIDPressure" ;;
+            esac
+          done
+        done)
+    if [ -n "$bad_nodes" ]; then
+      errors="${errors} node_issues=[${bad_nodes}]"
+    fi
+
+    # ── Inference pods ───────────────────────────────────────────
+    local inf_running
     inf_running=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct --no-headers 2>/dev/null | grep -c "Running" || true)
-    inf_other=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct --no-headers 2>/dev/null | grep -cv "Running" || true)
+    local inf_ready
+    inf_ready=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct --no-headers 2>/dev/null | awk '$2 ~ /^[0-9]+\/[0-9]+$/ { split($2,a,"/"); if(a[1]==a[2] && $3=="Running") c++ } END {print c+0}')
+    local inf_other
+    inf_other=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct --no-headers 2>/dev/null | grep -cvE "Running|Terminating" || true)
 
-    # Count training pods
+    [ "$inf_ready" -ne 4 ] && errors="${errors} inference_ready=${inf_ready}/4"
+    [ "$inf_other" -gt 0 ] && errors="${errors} stale_pods=${inf_other}"
+
+    # ── Training pods (should be zero) ───────────────────────────
+    local train_total
     train_total=$(kubectl get pods -n training-jobs --context $ctx --no-headers 2>/dev/null | wc -l)
+    [ "$train_total" -gt 0 ] && errors="${errors} training_pods=${train_total}"
 
-    # Check actual GPU allocation on GPU nodes
-    gpus_used=0
+    # ── GPU capacity ─────────────────────────────────────────────
+    local gpus_used=0
     for node in $(kubectl get nodes --context $ctx -l cloud.google.com/gke-accelerator=nvidia-rtx-pro-6000 -o name 2>/dev/null); do
+      local node_gpus
       node_gpus=$(kubectl get pods --all-namespaces --context $ctx --field-selector spec.nodeName=$(echo $node | cut -d/ -f2) -o jsonpath='{range .items[*]}{.spec.containers[0].resources.requests.nvidia\.com/gpu}{"\n"}{end}' 2>/dev/null | awk '{s+=$1} END {print s+0}')
       gpus_used=$((gpus_used + node_gpus))
     done
-    gpus_free=$((8 - gpus_used))
+    local gpus_free=$((8 - gpus_used))
+    [ "$gpus_free" -lt 4 ] && errors="${errors} free_gpus=${gpus_free}/4"
 
-    # HPA
+    # ── HPA ──────────────────────────────────────────────────────
+    local hpa_min hpa_max
     hpa_min=$(kubectl get hpa vllm-inference-hpa -n inference-server --context $ctx -o jsonpath='{.spec.minReplicas}' 2>/dev/null)
     hpa_max=$(kubectl get hpa vllm-inference-hpa -n inference-server --context $ctx -o jsonpath='{.spec.maxReplicas}' 2>/dev/null)
 
-    # Validate
-    errors=""
-    [ "$inf_running" -ne 4 ] && errors="${errors} inference=${inf_running}/4"
-    [ "$inf_other" -gt 0 ] && errors="${errors} stale_pods=${inf_other}"
-    [ "$train_total" -gt 0 ] && errors="${errors} training=${train_total}"
-    [ "$gpus_free" -lt 4 ] && errors="${errors} free_gpus=${gpus_free}/4"
-
     if [ -z "$errors" ]; then
-      echo "  ✓ $label: 4 inference Running, ${gpus_free} GPUs free, HPA min=${hpa_min} max=${hpa_max}"
+      echo "  ✓ $label: 4 inference ready, ${gpus_free} GPUs free, HPA min=${hpa_min} max=${hpa_max}"
     else
       echo "  ✗ $label: ISSUES:${errors}  (GPUs: ${gpus_used}/8 used, ${gpus_free} free, HPA min=${hpa_min} max=${hpa_max})"
       all_ok=false
     fi
   done
 
-  if ! $all_ok; then
-    echo ""
-    echo "  ⚠  Environment has issues. You may need to wait for pods to terminate"
-    echo "     or run the reset again. Check with:"
-    echo "     kubectl get pods -n inference-server --context worker-east1"
-    echo "     kubectl get pods -n inference-server --context worker-west3"
-    echo ""
-  fi
+  $all_ok
+}
+
+show_state() {
+  echo ""
+  echo "=== Validating environment ==="
+
+  local attempt=1
+  while [ $attempt -le $VALIDATION_RETRIES ]; do
+    if validate_environment; then
+      break
+    fi
+
+    if [ $attempt -eq $VALIDATION_RETRIES ]; then
+      echo ""
+      echo "  ✗ Environment NOT ready after $((VALIDATION_RETRIES * VALIDATION_INTERVAL))s. Aborting."
+      echo "    Debug:"
+      echo "      kubectl get pods -n inference-server --context worker-east1"
+      echo "      kubectl get pods -n inference-server --context worker-west3"
+      echo "      kubectl get nodes --context worker-east1 -o wide"
+      echo "      kubectl get nodes --context worker-west3 -o wide"
+      exit 1
+    fi
+
+    echo "  … retrying in ${VALIDATION_INTERVAL}s (attempt ${attempt}/${VALIDATION_RETRIES})"
+    sleep "$VALIDATION_INTERVAL"
+    attempt=$((attempt + 1))
+  done
 
   echo ""
   echo "=== Current State (target: $TARGET) ==="
