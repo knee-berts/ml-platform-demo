@@ -17,14 +17,14 @@ spec:
           name: prometheus.googleapis.com|vllm:kv_cache_usage_perc|gauge
         target:
           type: AverageValue
-          averageValue: "0.4"
+          averageValue: "0.45"
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 30
+      stabilizationWindowSeconds: 15
       policies:
         - type: Pods
-          value: 2
-          periodSeconds: 60
+          value: 4
+          periodSeconds: 30
     scaleDown:
       stabilizationWindowSeconds: 120
       policies:

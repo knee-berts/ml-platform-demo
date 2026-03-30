@@ -57,7 +57,11 @@ spec:
           command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
           args:
             - "--model"
-            - "meta-llama/Llama-3.1-8B-Instruct"
+            - "gs://kubecon-fleets-demo-1-model-weights/meta-llama/Llama-3.1-8B-Instruct/"
+            - "--load-format"
+            - "runai_streamer"
+            - "--model-loader-extra-config"
+            - '{"distributed":true}'
             - "--tensor-parallel-size"
             - "1"
             - "--port"

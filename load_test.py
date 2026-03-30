@@ -663,23 +663,30 @@ def make_prompt():
     # Unique prefix at the START ensures no KV-cache block is shared
     return f"[REQID:{uid}] Write a detailed 2500-word essay on {topic}.{FILLER}"
 
-def worker():
+def worker(worker_id):
+    # Stagger startup: each worker waits a random fraction of the expected
+    # request duration so they don't all fire and complete in lockstep.
+    # With 4096 tokens at ~30 tok/s per pod, a request takes ~130s.
+    # Spread workers across a 60s window for steady-state overlap.
+    time.sleep(random.uniform(0, min(60, WORKERS * 0.04)))
     while True:
+        # Randomize token count ±25% to desynchronize completion times
+        tokens = max(256, int(MAX_TOKENS * random.uniform(0.75, 1.25)))
         body = json.dumps({
             "model":      "meta-llama/Llama-3.1-8B-Instruct",
             "prompt":     make_prompt(),
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": tokens,
             "stream":     False,
         }).encode()
         try:
             req = urllib.request.Request(next_url(),
                 data=body, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=180):
+            with urllib.request.urlopen(req, timeout=300):
                 pass
         except Exception:
             time.sleep(0.2)
 
-threads = [threading.Thread(target=worker, daemon=True) for _ in range(WORKERS)]
+threads = [threading.Thread(target=worker, daemon=True, args=(i,)) for i in range(WORKERS)]
 [t.start() for t in threads]
 [t.join() for t in threads]
 """).strip()

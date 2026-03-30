@@ -50,6 +50,18 @@ The script creates a pod (`kv-load-gen`) inside the target cluster using `kubect
 
 The load pod runs inside the cluster (not locally) so that GCLB's geographic affinity routes requests to the nearest cluster, which is the target cluster itself.
 
+#### Steady-State Load Pattern
+
+The load generator is designed to produce smooth, sustained KV-cache utilization rather than bursty spikes. This is critical for GCLB's custom-metric-based routing — GCLB needs to see sustained above-threshold utilization across multiple consecutive metric samples before it shifts traffic to another region.
+
+Two mechanisms prevent request lockstep:
+
+1. **Staggered worker startup** — Each worker thread delays by a random amount (up to 60 seconds) before sending its first request. This spreads the initial burst across a wide window so workers enter their request loops at different times.
+
+2. **Randomized token count** — Each request generates `max_tokens +/- 25%`. With different generation lengths, workers complete at different times even if they started together, preventing the "all finish at once, all fire at once" pattern.
+
+Without these, all workers fire simultaneously, all requests complete at roughly the same time (same token count = same generation duration), and the KV cache sawtooths between 0% and 99%. GCLB may sample during a trough and never trigger spillover.
+
 ### Metrics Collection
 
 `MetricsCollector` threads run `kubectl exec` into each vLLM pod every 2 seconds and parse the Prometheus `/metrics` endpoint. Extracted metrics:
@@ -108,5 +120,7 @@ Install: `pip install rich`
 
 - **Load runs inside the cluster**: The load generator pod runs within the target worker cluster so GCLB's geographic affinity sends traffic to that cluster first. Running locally would bypass this behavior.
 - **Unique prompts per request**: Each request has a random prefix to prevent prefix-cache reuse, ensuring every request allocates fresh KV-cache blocks.
+- **Staggered workers + randomized tokens**: Workers start at staggered intervals and each request varies `max_tokens` by +/-25%. This produces smooth, sustained KV-cache utilization instead of bursty spikes that GCLB can't react to.
 - **Mgmt cluster for preemption detection**: Worker workloads just disappear when preempted. The management cluster's `Requeued=True` condition is the only reliable, sticky signal.
 - **Screen-mode Rich layout**: Uses `Live(screen=True)` for a full-terminal dashboard that updates in place without scrolling.
+- **Model streaming from GCS**: vLLM loads model weights directly from Cloud Storage using the Run:ai Model Streamer (`--load-format=runai_streamer`), reducing pod startup from minutes to ~3 seconds.
