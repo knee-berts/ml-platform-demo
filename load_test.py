@@ -36,16 +36,14 @@ from rich.panel import Panel
 from rich.text import Text
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
-DEFAULT_VIP         = "10.142.0.74"
+DEFAULT_VIP         = ""              # auto-discovered from gateway if not specified
 DEFAULT_CONCURRENCY = 300         # workers; each generates unique prompts to avoid prefix-cache reuse
 DEFAULT_MAX_TOKENS  = 2048        # long enough to keep requests in-flight and fill KV blocks
 KV_THRESHOLD        = 0.60        # must match GCPBackendPolicy maxUtilizationPercent (60%)
 METRICS_INTERVAL    = 2.0         # seconds between metric scrapes
 PROBE_CONCURRENCY   = 8           # parallel probe workers from local machine through single VIP
 
-LOAD_CONTEXT    = "worker-east1"
 LOAD_NAMESPACE  = "inference-server"
-LOAD_POD_NAME   = "kv-load-gen"
 
 # No shared PROMPT_BASE — each request is fully unique so no prefix-cache blocks
 # are shared between concurrent requests, forcing real KV-cache block allocation.
@@ -548,6 +546,34 @@ def kubectl(*args, context: str = "", timeout: int = 15) -> Tuple[str, int]:
         return str(e), 1
 
 
+def discover_gateway_vips() -> Dict[str, str]:
+    """Discover per-region VIPs from the cross-region gateway on the mgmt cluster.
+
+    Returns {"us-east1": "10.x.x.x", "us-west3": "10.x.x.x", ...}.
+    The gateway spec addresses contain region info in the type field, and
+    status addresses are assigned IPs in the same order.
+    """
+    out, rc = kubectl(
+        "get", "gateway", "cross-region-gateway", "-n", "gateway-system",
+        "-o", "json", context=MGMT_CONTEXT, timeout=10,
+    )
+    if rc != 0:
+        return {}
+    try:
+        gw = json.loads(out)
+        spec_addrs = gw.get("spec", {}).get("addresses", [])
+        status_addrs = gw.get("status", {}).get("addresses", [])
+        vips = {}
+        for i, sa in enumerate(spec_addrs):
+            # type is like "networking.gke.io/ephemeral-ipv4-address/us-east1"
+            region = sa.get("type", "").rsplit("/", 1)[-1]
+            if i < len(status_addrs) and region:
+                vips[region] = status_addrs[i].get("value", "")
+        return vips
+    except (json.JSONDecodeError, KeyError, IndexError):
+        return {}
+
+
 def get_vllm_pods(context: str, namespace: str) -> List[str]:
     """Return only pods where the vllm container is Ready (serving metrics)."""
     out, rc = kubectl(
@@ -962,7 +988,7 @@ class Dashboard:
                 )
             else:
                 t.append(
-                    f"  ✓  Monitoring  │  VIP: {DEFAULT_VIP}",
+                    f"  ✓  Monitoring  │  VIP: {self.vip}",
                     style="green",
                 )
         elif spilling:
@@ -973,7 +999,7 @@ class Dashboard:
             )
             t.append(
                 f"\n  Probes sent: {total}  →  {sc_label} received: {spill_cnt}  "
-                f"({spill_pct:.0f}% spilled)  │  VIP: {DEFAULT_VIP}",
+                f"({spill_pct:.0f}% spilled)  │  VIP: {self.vip}",
                 style="dim",
             )
         elif t_kv >= KV_THRESHOLD * 0.75:
@@ -984,7 +1010,7 @@ class Dashboard:
             )
         else:
             t.append(
-                f"  ✓  All traffic → {tc_label}  ({total} probes via {DEFAULT_VIP})",
+                f"  ✓  All traffic → {tc_label}  ({total} probes via {self.vip})",
                 style="green",
             )
 
@@ -1254,8 +1280,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Live KV-cache spillover demo for GKE multi-cluster inference gateway"
     )
-    parser.add_argument("--vip",         default=DEFAULT_VIP,
-                        help=f"Load balancer VIP (default {DEFAULT_VIP})")
+    parser.add_argument("--vip",         default="",
+                        help="Load balancer VIP (auto-discovered from gateway if not specified)")
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY,
                         help=f"Concurrent workers in load pod (default {DEFAULT_CONCURRENCY})")
     parser.add_argument("--max-tokens",  type=int, default=DEFAULT_MAX_TOKENS,
@@ -1280,12 +1306,22 @@ def main():
     target_cluster = f"us-{args.target_cluster}"  # "us-east1" or "us-west3"
     spill_cluster  = [c for c in CLUSTER_CONFIGS if c != target_cluster][0]
 
-    if args.target_cluster == "west3":
-        load_context = "worker-west3"
-        load_pod_name = "kv-load-gen-west3"
-    else:
-        load_context = LOAD_CONTEXT
-        load_pod_name = LOAD_POD_NAME
+    # Discover VIPs from gateway if not explicitly provided
+    if not args.vip:
+        vips = discover_gateway_vips()
+        if target_cluster in vips:
+            args.vip = vips[target_cluster]
+        elif vips:
+            # Fall back to first available VIP
+            args.vip = list(vips.values())[0]
+        else:
+            print("ERROR: Cannot discover gateway VIPs from mgmt cluster. "
+                  "Provide --vip explicitly.", file=sys.stderr)
+            sys.exit(1)
+
+    # Load generator runs inside the target cluster for geographic affinity
+    load_context = CLUSTER_CONFIGS[target_cluster]["context"]
+    load_pod_name = f"kv-load-gen-{args.target_cluster}"
 
     run_load      = args.mode in ("load", "both")
     run_dashboard = args.mode in ("dashboard", "both")
@@ -1312,24 +1348,15 @@ def main():
         # Determine load target
         if args.direct_ip:
             load_target = args.direct_ip
-        elif args.target_cluster == "west3":
-            # Auto-discover west3 ClusterIP
-            out, rc = kubectl("get", "svc", "vllm-llama3-8b-instruct", "-n", LOAD_NAMESPACE,
-                              "-o", "jsonpath={.spec.clusterIP}:{.spec.ports[0].port}",
-                              context="worker-west3")
-            if rc != 0 or not out:
-                console.print("[bold red]Cannot find west3 service — aborting[/bold red]")
-                sys.exit(1)
-            load_target = out
-            console.print(
-                f"[blue]West3 mode:[/blue] targeting west3 at [bold]{load_target}[/bold] "
-                f"(fills west3 KV cache → HPA scales → Kueue preempts training)"
-            )
-
-        if args.direct_ip:
             console.print(
                 f"[yellow]Direct mode:[/yellow] targeting [bold]{load_target}[/bold] "
                 f"(bypassing LB to fill KV cache directly)"
+            )
+        else:
+            spill_label = spill_cluster.replace("us-", "")
+            console.print(
+                f"[green]VIP mode:[/green] load → [bold]{args.vip}[/bold] ({args.target_cluster} VIP) "
+                f"→ saturates {args.target_cluster} → GCLB spills to {spill_label}"
             )
 
         loader_proc = launch_load_in_pod(

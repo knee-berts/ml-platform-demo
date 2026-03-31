@@ -58,10 +58,13 @@ spec:
           args:
             - "--model"
             - "gs://kubecon-fleets-demo-1-model-weights/meta-llama/Llama-3.1-8B-Instruct/"
+            - "--served-model-name"
+            - "meta-llama/Llama-3.1-8B-Instruct"
             - "--load-format"
             - "runai_streamer"
             - "--model-loader-extra-config"
             - '{"distributed":true}'
+            - "--enforce-eager"
             - "--tensor-parallel-size"
             - "1"
             - "--port"

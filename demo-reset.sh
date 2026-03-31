@@ -2,9 +2,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Demo Reset Script
 #
+# --target is the region whose VIP receives the initial load. That region
+# saturates (HPA pinned at 4). GCLB spills traffic to the OTHER region,
+# where HPA can scale to 6 and Kueue preempts training jobs.
+#
 # Usage:
-#   ./demo-reset.sh --target east1                  # Reset all, HPA scales on east1
-#   ./demo-reset.sh --target west3                  # Reset all, HPA scales on west3
+#   ./demo-reset.sh --target east1                  # Load enters east1, spillover to west3
+#   ./demo-reset.sh --target west3                  # Load enters west3, spillover to east1
 #   ./demo-reset.sh --multikueue --target east1     # Reset only training jobs
 #   ./demo-reset.sh --loadtest --target west3       # Reset only load test
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,8 +40,8 @@ MODE="${MODE:-all}"
 if [ -z "$TARGET" ]; then
   echo "Usage: $0 [--all | --multikueue | --loadtest] --target <east1|west3>"
   echo ""
-  echo "  --target east1   Load test targets east1 (east1 HPA max=6, west3 HPA max=4)"
-  echo "  --target west3   Load test targets west3 (west3 HPA max=6, east1 HPA max=4)"
+  echo "  --target east1   Load enters east1 VIP, spills to west3 (west3 HPA max=6)"
+  echo "  --target west3   Load enters west3 VIP, spills to east1 (east1 HPA max=6)"
   echo "  --all            Reset everything (default)"
   echo "  --multikueue     Reset only training jobs"
   echo "  --loadtest       Reset only load test"
@@ -52,9 +56,9 @@ else
   OTHER_CTX="worker-east1"
 fi
 
-# Trap: always restore HPAs on exit (target gets max 6, other gets max 4)
-trap 'kubectl patch hpa vllm-inference-hpa -n inference-server --context '"$TARGET_CTX"' --type=merge -p "{\"spec\":{\"minReplicas\":4,\"maxReplicas\":6}}" 2>/dev/null
-kubectl patch hpa vllm-inference-hpa -n inference-server --context '"$OTHER_CTX"' --type=merge -p "{\"spec\":{\"minReplicas\":4,\"maxReplicas\":4}}" 2>/dev/null' ERR EXIT
+# Trap: always restore HPAs on exit (target pinned at 4, spillover scales to 6)
+trap 'kubectl patch hpa vllm-inference-hpa -n inference-server --context '"$TARGET_CTX"' --type=merge -p "{\"spec\":{\"minReplicas\":4,\"maxReplicas\":4}}" 2>/dev/null
+kubectl patch hpa vllm-inference-hpa -n inference-server --context '"$OTHER_CTX"' --type=merge -p "{\"spec\":{\"minReplicas\":4,\"maxReplicas\":6}}" 2>/dev/null' ERR EXIT
 
 remediate_disk_pressure() {
   # Replace GPU nodes with DiskPressure so pods can schedule on fresh nodes.
@@ -136,10 +140,11 @@ reset_loadtest() {
       kubectl delete workloads --all -n inference-server --context $ctx --ignore-not-found 2>/dev/null || true
       sleep 5
       # Restore HPA before scaling back up so it doesn't clamp replicas
+      # Target pinned at 4 (saturates), spillover scales to 6 (preemption happens here)
       if [ "$ctx" = "$TARGET_CTX" ]; then
-        kubectl patch hpa vllm-inference-hpa -n inference-server --context $ctx --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":6}}' 2>/dev/null
-      else
         kubectl patch hpa vllm-inference-hpa -n inference-server --context $ctx --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":4}}' 2>/dev/null
+      else
+        kubectl patch hpa vllm-inference-hpa -n inference-server --context $ctx --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":6}}' 2>/dev/null
       fi
       kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --context $ctx --replicas=4
     else
@@ -160,10 +165,10 @@ reset_loadtest() {
   kubectl rollout status deployment/vllm-llama3-8b-instruct -n inference-server --context worker-west3 --timeout=300s &
   wait
 
-  # Restore HPAs to correct values before validation
-  echo "--- Restoring HPAs (target max=6, other max=4) ---"
-  kubectl patch hpa vllm-inference-hpa -n inference-server --context "$TARGET_CTX" --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":6}}' 2>/dev/null
-  kubectl patch hpa vllm-inference-hpa -n inference-server --context "$OTHER_CTX" --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":4}}' 2>/dev/null
+  # Restore HPAs: target pinned at 4, spillover scales to 6
+  echo "--- Restoring HPAs (target max=4, spillover max=6) ---"
+  kubectl patch hpa vllm-inference-hpa -n inference-server --context "$TARGET_CTX" --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":4}}' 2>/dev/null
+  kubectl patch hpa vllm-inference-hpa -n inference-server --context "$OTHER_CTX" --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":6}}' 2>/dev/null
 
   # Wait for KV cache to drain
   echo "--- Waiting 15s for KV cache to cool ---"
@@ -321,13 +326,13 @@ show_state() {
     echo "  $label: ${inf} inference + ${train} training = $((inf + train))/8 GPUs  (HPA max: $hpa_max)"
   done
   echo ""
+  SPILL=$([ "$TARGET" = "east1" ] && echo "west3" || echo "east1")
   echo "Ready to run:"
   echo "  ./demo-multikueue.sh --target $TARGET             # MultiKueue demo"
-  if [ "$TARGET" = "east1" ]; then
-    echo "  python3 load_test.py --vip 10.142.0.74 --concurrency 300   # Load test east1"
-  else
-    echo "  python3 load_test.py --target-cluster west3 --concurrency 300   # Load test west3"
-  fi
+  echo "  python3 load_test.py --target-cluster $TARGET --concurrency 1500 --max-tokens 512   # Load via ${TARGET} VIP"
+  echo ""
+  echo "  Target ($TARGET): HPA pinned at 4 — saturates, triggers GCLB spillover"
+  echo "  Spillover ($SPILL): HPA max 6 — scales out, preempts training jobs"
 }
 
 case "$MODE" in

@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: baseline-load-gen
+  namespace: inference-server
+  labels:
+    app: baseline-load-gen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: baseline-load-gen
+  template:
+    metadata:
+      labels:
+        app: baseline-load-gen
+    spec:
+      containers:
+        - name: load-gen
+          image: python:3.11-slim
+          command: ["python3", "-c"]
+          args:
+            - |
+              import threading, json, urllib.request, sys, time, random, string, itertools
+
+              TARGET = "vllm-llama3-8b-instruct.inference-server.svc.cluster.local:8000"
+              WORKERS = 1100
+              MAX_TOKENS = 512
+              URL = f"http://{TARGET}/v1/completions"
+
+              TOPICS = [
+                  "distributed GPU memory allocation and KV-cache paging",
+                  "transformer multi-head attention in large language models",
+                  "CUDA kernel optimization for NVIDIA Blackwell sm_120 architecture",
+                  "speculative decoding and draft model selection strategies",
+                  "tensor parallelism and ring-allreduce in multi-GPU inference",
+                  "continuous batching and iteration-level scheduling in vLLM",
+                  "FlashAttention v3 tiling algorithms and SRAM utilization",
+                  "GPTQ, AWQ, and FP8 quantization calibration techniques",
+                  "prefix caching via radix trie in paged attention systems",
+                  "pipeline parallelism bubble minimization with micro-batching",
+                  "KV-cache eviction policies under memory pressure",
+                  "LoRA adapter hot-swapping without inference interruption",
+                  "inference gateway load balancing with custom metrics",
+                  "chunked prefill scheduling for long-context requests",
+                  "NVIDIA NVLink bandwidth optimization for tensor operations",
+              ]
+
+              FILLER = (
+                  " Provide a comprehensive technical analysis including: architecture "
+                  "diagrams, algorithmic complexity, memory footprint calculations, "
+                  "latency-throughput trade-offs, production deployment considerations, "
+                  "failure modes and mitigations, benchmark comparisons across hardware "
+                  "generations, code-level implementation details, and future research "
+                  "directions. Be exhaustive and precise with numerical values."
+              )
+
+              def make_prompt():
+                  uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=48))
+                  topic = random.choice(TOPICS)
+                  return f"[REQID:{uid}] Write a detailed 2500-word essay on {topic}.{FILLER}"
+
+              def worker(worker_id):
+                  # Stagger startup across 60s window
+                  time.sleep(random.uniform(0, 60))
+                  while True:
+                      tokens = max(256, int(MAX_TOKENS * random.uniform(0.75, 1.25)))
+                      body = json.dumps({
+                          "model": "meta-llama/Llama-3.1-8B-Instruct",
+                          "prompt": make_prompt(),
+                          "max_tokens": tokens,
+                          "stream": False,
+                      }).encode()
+                      try:
+                          req = urllib.request.Request(URL, data=body,
+                              headers={"Content-Type": "application/json"})
+                          with urllib.request.urlopen(req, timeout=300):
+                              pass
+                      except Exception:
+                          time.sleep(0.5)
+
+              print(f"Starting {WORKERS} workers against {TARGET} (max_tokens={MAX_TOKENS})")
+              threads = [threading.Thread(target=worker, daemon=True, args=(i,)) for i in range(WORKERS)]
+              [t.start() for t in threads]
+
+              # Print stats periodically
+              while True:
+                  alive = sum(1 for t in threads if t.is_alive())
+                  print(f"[{time.strftime('%H:%M:%S')}] {alive}/{WORKERS} workers alive")
+                  time.sleep(60)
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+      restartPolicy: Always

@@ -3,13 +3,15 @@
 # MultiKueue Demo — Shows how MultiKueue distributes training jobs across
 # clusters based on available GPU capacity.
 #
-# Submits 3 training jobs: the --target cluster gets 2 (filling it), the other
-# gets 1 (leaving 2 GPUs free). When the load test preempts a training job on
-# the target cluster, MultiKueue can reschedule it to the cluster with room.
+# --target is the region whose VIP receives the initial load. That region gets
+# 2 training jobs (filling GPU capacity). The spillover region gets 1 training
+# job (leaving 2 GPUs free). When GCLB spills traffic to the spillover region,
+# HPA scales out, Kueue preempts the training job, and MultiKueue reschedules
+# it to the target region (which has room because its HPA doesn't scale).
 #
 # Usage:
-#   ./demo-multikueue.sh --target east1             # Interactive, load test east1
-#   ./demo-multikueue.sh --target west3             # Interactive, load test west3
+#   ./demo-multikueue.sh --target east1             # Interactive, load enters east1
+#   ./demo-multikueue.sh --target west3             # Interactive, load enters west3
 #   ./demo-multikueue.sh --target east1 --auto      # Automated with pauses
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
@@ -23,10 +25,12 @@ kubectl patch clusterqueue gpu-cluster-queue --context worker-west3 --type=merge
 
 AUTO=false
 TARGET=""
+RUN_LOAD=false
 
 for arg in "$@"; do
   case "$arg" in
     --auto) AUTO=true ;;
+    --load) RUN_LOAD=true ;;
     --target) :;; # next arg is the value
     east1|--target=east1) TARGET="east1" ;;
     west3|--target=west3) TARGET="west3" ;;
@@ -42,11 +46,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$TARGET" ]; then
-  echo "Usage: $0 --target <east1|west3> [--auto]"
+  echo "Usage: $0 --target <east1|west3> [--auto] [--load]"
   echo ""
-  echo "  --target east1   Fill east1 with training (load test east1 later)"
-  echo "  --target west3   Fill west3 with training (load test west3 later)"
+  echo "  --target east1   Load enters east1 VIP; 2 jobs on east1, 1 on west3"
+  echo "  --target west3   Load enters west3 VIP; 2 jobs on west3, 1 on east1"
   echo "  --auto           Automated mode with pauses (for recording)"
+  echo "  --load           After scheduling jobs, start the load test (load mode, no dashboard)"
   exit 1
 fi
 
@@ -54,19 +59,38 @@ if [ "$TARGET" = "east1" ]; then
   TARGET_CTX="worker-east1"
   TARGET_LABEL="east1"
   TARGET_COLOR='\033[0;31m'
+  OTHER_CTX="worker-west3"
   OTHER_LABEL="west3"
   OTHER_COLOR='\033[0;36m'
-  EAST1_VIP="10.142.0.74"
-  LOAD_CMD="python3 load_test.py --vip $EAST1_VIP --concurrency 300"
 else
   TARGET_CTX="worker-west3"
   TARGET_LABEL="west3"
   TARGET_COLOR='\033[0;36m'
+  OTHER_CTX="worker-east1"
   OTHER_LABEL="east1"
   OTHER_COLOR='\033[0;31m'
-  WEST3_VIP="10.180.0.33"
-  LOAD_CMD="python3 load_test.py --target-cluster west3 --concurrency 300"
 fi
+
+# Discover VIP for target region from the gateway
+# Gateway spec addresses contain region in type, status addresses have IPs in same order
+VIP=$(kubectl get gateway cross-region-gateway -n gateway-system --context mgmt -o json 2>/dev/null | python3 -c "
+import sys, json
+gw = json.load(sys.stdin)
+spec = gw.get('spec',{}).get('addresses',[])
+status = gw.get('status',{}).get('addresses',[])
+for i, sa in enumerate(spec):
+    region = sa.get('type','').rsplit('/',1)[-1]
+    if region == 'us-${TARGET_LABEL}' and i < len(status):
+        print(status[i].get('value',''))
+        break
+" 2>/dev/null)
+
+if [ -z "$VIP" ]; then
+  echo "ERROR: Cannot discover VIP for us-${TARGET_LABEL} from gateway. Check mgmt cluster connectivity."
+  exit 1
+fi
+
+LOAD_CMD="python3 load_test.py --target-cluster $TARGET --concurrency 1500 --max-tokens 512"
 
 BOLD='\033[1m'
 DIM='\033[2m'
@@ -104,8 +128,8 @@ show_gpu_state() {
     for i in $(seq 1 $train); do bar="${bar}${MAGENTA}█${NC}"; done
     for i in $(seq 1 $free); do bar="${bar}░"; done
     marker=""
-    [ "$label" = "$TARGET_LABEL" ] && marker=" ${YELLOW}← load target${NC}"
-    [ "$label" = "$OTHER_LABEL" ] && [ "$free" -gt 0 ] && marker=" ${GREEN}← room for evicted job${NC}"
+    [ "$label" = "$TARGET_LABEL" ] && marker=" ${YELLOW}← load enters here (HPA pinned)${NC}"
+    [ "$label" = "$OTHER_LABEL" ] && [ "$free" -gt 0 ] && marker=" ${GREEN}← spillover (HPA scales, preempts)${NC}"
     echo -e "  ${BOLD}$label${NC}  [${bar}]  ${CYAN}${inf}i${NC} ${MAGENTA}${train}t${NC} ${DIM}${free} free${NC}${marker}"
   done
   echo -e "  ${DIM}Legend: ${CYAN}█${NC}${DIM}=inference ${MAGENTA}█${NC}${DIM}=training ░=free${NC}"
@@ -246,8 +270,8 @@ echo ""
 echo -e "  ${DIM}Clusters: us-east1 (8 GPUs) + us-west3 (8 GPUs) = 16 GPUs total${NC}"
 echo -e "  ${DIM}Each cluster runs 4 inference pods (4 GPUs) → 4 GPUs free each${NC}"
 echo ""
-echo -e "  Load test target: ${TARGET_COLOR}${BOLD}${TARGET_LABEL}${NC}"
-echo -e "  ${DIM}Submitting 3 jobs: 2 fill ${TARGET_LABEL}, 1 on ${OTHER_LABEL} (leaves room for eviction)${NC}"
+echo -e "  Load enters: ${TARGET_COLOR}${BOLD}${TARGET_LABEL}${NC} VIP ($VIP)"
+echo -e "  ${DIM}Submitting 3 jobs: 2 on ${OTHER_LABEL} (spillover, preemption target), 1 on ${TARGET_LABEL}${NC}"
 
 pause 5
 
@@ -262,14 +286,11 @@ show_mgmt_workloads
 
 pause 4
 
-# Temporarily restrict the non-target cluster so jobs 1+2 land on the target.
-# We set the non-target ClusterQueue GPU quota to 0, forcing MultiKueue to
-# pick the target cluster. This happens behind the scenes — the audience just
+# Temporarily restrict the TARGET cluster so jobs 1+2 land on the SPILLOVER.
+# We set the target ClusterQueue GPU quota to 0, forcing MultiKueue to
+# pick the spillover cluster. This happens behind the scenes — the audience just
 # sees MultiKueue choosing the cluster with capacity.
-OTHER_CTX=$([ "$TARGET" = "east1" ] && echo "worker-west3" || echo "worker-east1")
-TARGET_CTX=$([ "$TARGET" = "east1" ] && echo "worker-east1" || echo "worker-west3")
-
-kubectl patch clusterqueue gpu-cluster-queue --context $OTHER_CTX --type=merge \
+kubectl patch clusterqueue gpu-cluster-queue --context $TARGET_CTX --type=merge \
   -p '{"spec":{"resourceGroups":[{"coveredResources":["nvidia.com/gpu"],"flavors":[{"name":"rtx-pro-6000","resources":[{"name":"nvidia.com/gpu","nominalQuota":0}]}]}]}}' \
   2>/dev/null
 
@@ -301,15 +322,15 @@ show_gpu_state
 
 pause 4
 
-# Restore non-target cluster quota so job 3 can land there
-kubectl patch clusterqueue gpu-cluster-queue --context $OTHER_CTX --type=merge \
+# Restore target cluster quota so job 3 can land there
+kubectl patch clusterqueue gpu-cluster-queue --context $TARGET_CTX --type=merge \
   -p '{"spec":{"resourceGroups":[{"coveredResources":["nvidia.com/gpu"],"flavors":[{"name":"rtx-pro-6000","resources":[{"name":"nvidia.com/gpu","nominalQuota":8}]}]}]}}' \
   2>/dev/null
 sleep 2
 
 # ── Step 4: Submit third training job ────────────────────────────────────────
 
-narrate "Step 4: Submit training-job-3 (2 GPUs) — ${TARGET_LABEL} is full, MultiKueue finds ${OTHER_LABEL}"
+narrate "Step 4: Submit training-job-3 (2 GPUs) — ${OTHER_LABEL} is full, MultiKueue dispatches to ${TARGET_LABEL}"
 echo -e "  ${DIM}kubectl apply -f training-job-3.yaml --context mgmt${NC}"
 echo ""
 
@@ -335,32 +356,28 @@ echo -e "  ${DIM}── Training Pods (worker clusters) ──${NC}"
 show_worker_training
 echo ""
 
-# Determine which cluster is full (has 2 training jobs) — that's the load test target
-east_train=$(kubectl get pods -n training-jobs --context worker-east1 --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
-west_train=$(kubectl get pods -n training-jobs --context worker-west3 --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
-
-if [ "$east_train" -ge 4 ]; then
-  FULL_LABEL="east1"
-  FREE_LABEL="west3"
-  SUGGESTED_CMD="python3 load_test.py --vip 10.142.0.74 --concurrency 300"
-elif [ "$west_train" -ge 4 ]; then
-  FULL_LABEL="west3"
-  FREE_LABEL="east1"
-  SUGGESTED_CMD="python3 load_test.py --target-cluster west3 --concurrency 300"
-else
-  FULL_LABEL="$TARGET_LABEL"
-  FREE_LABEL="$OTHER_LABEL"
-  SUGGESTED_CMD="$LOAD_CMD"
-fi
-
 echo -e "${BOLD}══════════════════════════════════════════════════════════════${NC}"
 echo -e "${BOLD}  3 training jobs dispatched by MultiKueue.                 ${NC}"
-echo -e "${BOLD}  ${FULL_LABEL}: 4 inference + 4 training = 8/8 GPUs (full)            ${NC}"
-echo -e "${BOLD}  ${FREE_LABEL}: 4 inference + 2 training = 6/8 GPUs (2 free)           ${NC}"
+echo -e "${BOLD}  ${OTHER_LABEL}: 4 inference + 4 training = 8/8 GPUs (full)            ${NC}"
+echo -e "${BOLD}  ${TARGET_LABEL}: 4 inference + 2 training = 6/8 GPUs (2 free)           ${NC}"
 echo -e "${BOLD}                                                            ${NC}"
-echo -e "${BOLD}  Next: Load test ${FULL_LABEL} to trigger preemption.                  ${NC}"
-echo -e "${BOLD}  Evicted training job → reschedules to ${FREE_LABEL} (has room).       ${NC}"
+echo -e "${BOLD}  Next: Load test via ${TARGET_LABEL} VIP ($VIP)              ${NC}"
+echo -e "${BOLD}  ${TARGET_LABEL} saturates → GCLB spills to ${OTHER_LABEL}              ${NC}"
+echo -e "${BOLD}  ${OTHER_LABEL} HPA scales → preempts training → reschedules to ${TARGET_LABEL}${NC}"
 echo -e "${BOLD}══════════════════════════════════════════════════════════════${NC}"
 echo ""
-echo -e "  Run: ${BOLD}${SUGGESTED_CMD}${NC}"
-echo ""
+
+if $RUN_LOAD; then
+  pause 3
+
+  narrate "Step 6: Starting load test via ${TARGET_LABEL} VIP ($VIP)"
+  echo -e "  ${DIM}python3 load_test.py --concurrency 3000 --max-tokens 512 --target-cluster $TARGET --mode load${NC}"
+  echo ""
+
+  pause 2
+
+  exec python3 load_test.py --concurrency 3000 --max-tokens 512 --target-cluster "$TARGET" --mode load
+else
+  echo -e "  Run: ${BOLD}python3 load_test.py --concurrency 3000 --max-tokens 512 --target-cluster $TARGET --mode load${NC}"
+  echo ""
+fi
