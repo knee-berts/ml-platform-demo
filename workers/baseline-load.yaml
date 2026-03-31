@@ -24,7 +24,7 @@ spec:
               import threading, json, urllib.request, sys, time, random, string, itertools
 
               TARGET = "vllm-llama3-8b-instruct.inference-server.svc.cluster.local:8000"
-              WORKERS = 1100
+              WORKERS = 1430
               MAX_TOKENS = 512
               URL = f"http://{TARGET}/v1/completions"
 

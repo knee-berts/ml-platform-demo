@@ -188,6 +188,9 @@ spec:
                 - key: nvidia.com/gpu
                   operator: Exists
                   effect: NoSchedule
+                - key: sandbox.gke.io/runtime
+                  operator: Exists
+                  effect: NoSchedule
               containers:
                 - name: training-sim
                   image: nvidia/cuda:12.6.3-base-ubuntu24.04
@@ -216,6 +219,9 @@ spec:
                 cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
               tolerations:
                 - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+                - key: sandbox.gke.io/runtime
                   operator: Exists
                   effect: NoSchedule
               containers:
