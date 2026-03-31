@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm-snapshot-sa
+  namespace: inference-server
+
+---
+apiVersion: podsnapshot.gke.io/v1alpha1
+kind: PodSnapshotStorageConfig
+metadata:
+  name: vllm-snapshot-storage
+spec:
+  snapshotStorageConfig:
+    gcs:
+      bucket: "kubecon-fleets-demo-1-pod-snapshots"
+      path: "inference-server"
+
+---
+apiVersion: podsnapshot.gke.io/v1alpha1
+kind: PodSnapshotPolicy
+metadata:
+  name: vllm-snapshot-policy
+  namespace: inference-server
+spec:
+  storageConfigName: vllm-snapshot-storage
+  selector:
+    matchLabels:
+      app: vllm-llama3-8b-instruct
+  triggerConfig:
+    type: manual
+    postCheckpoint: resume
