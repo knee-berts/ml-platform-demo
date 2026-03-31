@@ -257,7 +257,3 @@ gcloud container clusters get-credentials ai-worker-us-west3 \
 - Metrics are scraped every 2 seconds via `kubectl exec` into each pod
 - Kueue state is polled every 3 seconds
 - If pods are restarting, the dashboard may show brief scrape errors before they recover
-
-## Known Limitations
-
-- **KV-cache cross-cluster spillover (Tier 1)**: The GCP autoscaling metrics exporter cannot push named metrics to the GCLB backend service because it is global (created by multi-cluster gateway) but the UAS endpoint is regional. GCLB always sees `metrics={}`, so threshold-based spillover between clusters does not trigger. EPP within each cluster (Tier 2) routes correctly. See `FINDINGS.md` for full investigation.
