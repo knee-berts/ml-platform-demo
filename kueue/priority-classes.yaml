@@ -11,3 +11,10 @@ metadata:
   name: training-low
 value: 100
 description: "Low priority for training jobs, preemptable by inference"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata:
+  name: training-critical
+value: 2000
+description: "Critical training jobs that preempt inference servers"

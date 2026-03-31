@@ -1059,6 +1059,57 @@ class Dashboard:
                         metric_style = "bold red" if over else "dim"
                         hpa_text.append(f" {val_pct:.0f}%/{tgt_pct:.0f}%", style=metric_style)
 
+        # MultiKueue depth — query mgmt cluster for the full queue view
+        # Worker clusters only see dispatched workloads; mgmt sees all (pending + admitted)
+        depth_text = Text()
+        mgmt_wl_out, mgmt_rc = kubectl(
+            "get", "workloads", "-n", "training-jobs",
+            "-o", "jsonpath={range .items[*]}{.metadata.name}|"
+            "{range .status.conditions[*]}{.type}={.status},{end}"
+            "{\"\\n\"}{end}",
+            context=MGMT_CONTEXT, timeout=10,
+        )
+        mgmt_jobs = []
+        if mgmt_rc == 0 and mgmt_wl_out:
+            for line in mgmt_wl_out.strip().splitlines():
+                parts = line.split("|")
+                if len(parts) < 2:
+                    continue
+                name = parts[0]
+                conds = {}
+                for c in parts[1].split(","):
+                    if "=" in c:
+                        k, v = c.split("=", 1)
+                        conds[k] = v
+                admitted = conds.get("Admitted") == "True"
+                evicted = conds.get("Evicted") == "True"
+                finished = conds.get("Finished") == "True"
+                if finished and not evicted:
+                    continue
+                mgmt_jobs.append({"name": name, "admitted": admitted, "evicted": evicted})
+        if mgmt_jobs:
+            n_admitted = sum(1 for j in mgmt_jobs if j["admitted"] and not j["evicted"])
+            n_pending = sum(1 for j in mgmt_jobs if not j["admitted"] and not j["evicted"])
+            n_evicted = sum(1 for j in mgmt_jobs if j["evicted"])
+            depth_text.append("\n  MultiKueue depth  ", style="bold dim")
+            for j in sorted(mgmt_jobs, key=lambda j: (0 if j["admitted"] and not j["evicted"] else 1 if j["evicted"] else 2, j["name"])):
+                if j["evicted"]:
+                    depth_text.append("█", style="red")
+                elif j["admitted"]:
+                    depth_text.append("█", style="green")
+                else:
+                    depth_text.append("█", style="yellow")
+            depth_text.append(f"  {len(mgmt_jobs)} jobs", style="dim")
+            depth_text.append(f"  [", style="dim")
+            depth_text.append(f"█", style="green")
+            depth_text.append(f"dispatched ", style="dim")
+            depth_text.append(f"█", style="yellow")
+            depth_text.append(f"queued", style="dim")
+            if n_evicted:
+                depth_text.append(f" █", style="red")
+                depth_text.append(f"preempted", style="dim")
+            depth_text.append(f"]", style="dim")
+
         # Workloads table
         tbl = Table(box=box.SIMPLE, expand=True, show_header=True,
                     header_style="bold dim", padding=(0, 1))
@@ -1075,8 +1126,15 @@ class Dashboard:
 
         # Sort by cluster, then type (training first so preemption is visible), then name
         for wl in sorted(workloads, key=lambda w: (w.cluster, 0 if w.namespace == "training-jobs" else 1, w.name)):
-            wl_type = "inference" if wl.namespace == "inference-server" else "training"
-            type_style = "cyan" if wl_type == "inference" else "magenta"
+            if wl.namespace == "inference-server":
+                wl_type = "inference"
+                type_style = "cyan"
+            elif "pre-training" in wl.name:
+                wl_type = "pre-training"
+                type_style = "red"
+            else:
+                wl_type = "experiment"
+                type_style = "magenta"
             cluster_label = "east1" if "east" in wl.cluster else "west3"
             cluster_style = "red" if "east" in wl.cluster else "blue"
 
@@ -1112,7 +1170,7 @@ class Dashboard:
         # Training pods summary per cluster
         pods_text = Text()
         if training_pods:
-            pods_text.append("  Training pods: ", style="dim")
+            pods_text.append("  Experiment/Pre-training pods: ", style="dim")
             for cname, clabel, cstyle in [("us-east1", "east1", "red"), ("us-west3", "west3", "blue")]:
                 cpods = [p for p in training_pods if p.get("cluster") == cname]
                 if not cpods:
@@ -1142,7 +1200,7 @@ class Dashboard:
                 else:
                     events_text.append(f"  {ev}\n", style="yellow")
 
-        body = Group(hpa_text, tbl, pods_text, events_text)
+        body = Group(hpa_text, depth_text, tbl, pods_text, events_text)
 
         # Count GPUs per cluster
         evicted_count = sum(1 for wl in workloads if wl.evicted)
@@ -1150,8 +1208,9 @@ class Dashboard:
         for cname, clabel, cstyle in [("us-east1", "east1", "red"), ("us-west3", "west3", "blue")]:
             cwl = [wl for wl in workloads if wl.cluster == cname]
             cinf = sum(wl.gpu_count for wl in cwl if wl.namespace == "inference-server" and wl.admitted)
-            ctrain = sum(wl.gpu_count for wl in cwl if wl.namespace == "training-jobs" and wl.admitted)
-            gpu_parts.append(f"[{cstyle}]{clabel}[/{cstyle}] [dim]inf:[/dim] {cinf}  [dim]train:[/dim] {ctrain}")
+            cexp = sum(wl.gpu_count for wl in cwl if wl.namespace == "training-jobs" and "pre-training" not in wl.name and wl.admitted)
+            cpre = sum(wl.gpu_count for wl in cwl if wl.namespace == "training-jobs" and "pre-training" in wl.name and wl.admitted)
+            gpu_parts.append(f"[{cstyle}]{clabel}[/{cstyle}] [dim]inf:[/dim] {cinf}  [dim]exp:[/dim] {cexp}  [dim]pre:[/dim] {cpre}")
 
         title = (
             f"Kueue Orchestration  [dim]│[/dim]  "
@@ -1209,7 +1268,7 @@ class Dashboard:
             with self.kueue_state._lock:
                 n_wl = len(self.kueue_state.workloads)
                 n_ev = len(self.kueue_state.events)
-            kueue_rows = max(11, n_wl + max(n_ev, 6) + 14)
+            kueue_rows = max(12, n_wl + max(n_ev, 6) + 15)
 
         layout = Layout()
         layout.split_column(
