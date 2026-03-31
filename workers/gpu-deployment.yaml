@@ -18,6 +18,9 @@ spec:
         kueue.x-k8s.io/queue-name: inference-queue
         kueue.x-k8s.io/priority-class: inference-high
     spec:
+      runtimeClassName: gvisor
+      serviceAccountName: vllm-snapshot-sa
+
       nodeSelector:
         cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
 
