@@ -26,8 +26,8 @@ The demo has two acts:
                     ┌─────────────┴─────────────┐
                     ▼                             ▼
           ┌─────────────────┐           ┌─────────────────┐
-          │  us-east1 (8 GPU) │           │  us-west3 (8 GPU) │
-          │                 │           │                 │
+          │  us-east1       │           │  us-west4       │
+          │  (8 GPU)        │           │  (8 GPU)        │
           │  vLLM pods (4)  │           │  vLLM pods (4)  │
           │  EPP            │           │  EPP            │
           │  InferencePool  │           │  InferencePool  │
