@@ -13,26 +13,26 @@ The script runs several concurrent threads, each responsible for a different asp
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Main Thread                                                    │
-│  └── Rich Live dashboard (renders at 2 fps)                    │
+│  └── Rich Live dashboard (renders at 2 fps)                     │
 │                                                                 │
 │  MetricsCollector (thread per cluster)                          │
-│  └── kubectl exec into each vLLM pod → scrape /metrics         │
-│      → KV cache %, running/waiting requests                    │
+│  └── kubectl exec into each vLLM pod → scrape /metrics          │
+│      → KV cache %, running/waiting requests                     │
 │                                                                 │
 │  KueueCollector (thread)                                        │
-│  └── kubectl get workloads on worker-east1, worker-west3, mgmt │
-│      → detects preemption (Requeued=True), new inference pods  │
-│      → kubectl get hpa, training pods                          │
+│  └── kubectl get workloads on worker-east1, worker-west3, mgmt  │
+│      → detects preemption (Requeued=True), new inference pods   │
+│      → kubectl get hpa, training pods                           │
 │                                                                 │
 │  VipProber (thread)                                             │
-│  └── HTTP requests through VIP → tracks which cluster responds │
+│  └── HTTP requests through VIP → tracks which cluster responds  │
 │                                                                 │
 │  RequestCounter (thread)                                        │
-│  └── Polls vLLM success counters to estimate RPS               │
+│  └── Polls vLLM success counters to estimate RPS                │
 │                                                                 │
 │  Load Generator (runs inside cluster as a pod)                  │
-│  └── Spawned via kubectl run, sends concurrent requests to VIP │
-│      from within the target cluster (geographic affinity)      │
+│  └── Spawned via kubectl run, sends concurrent requests to VIP  │
+│      from within the target cluster (geographic affinity)       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
