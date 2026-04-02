@@ -204,10 +204,10 @@ class KueueCollector(threading.Thread):
         workloads = []
         for line in raw.strip().splitlines():
             parts = line.split("|")
-            if len(parts) < 7:
+            if len(parts) < 8:
                 continue
-            name, ns, queue, pclass, cq, conds_raw, gpu_raw = (
-                parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+            name, ns, queue, pclass, cq, conds_raw, replicas_raw, gpu_per_replica_raw = (
+                parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6], parts[7]
             )
             conds = {}
             for c in conds_raw.split(","):
@@ -227,9 +227,14 @@ class KueueCollector(threading.Thread):
                 phase = "Pending"
 
             try:
-                gpu_count = int(gpu_raw.strip() or "1")
+                replicas = int(replicas_raw.strip() or "1")
             except ValueError:
-                gpu_count = 1
+                replicas = 1
+            try:
+                gpus_per_replica = int(gpu_per_replica_raw.strip() or "1")
+            except ValueError:
+                gpus_per_replica = 1
+            gpu_count = replicas * gpus_per_replica
 
             # Skip finished workloads — unless evicted (keep visible for demo)
             finished = conds.get("Finished") == "True"
@@ -252,7 +257,8 @@ class KueueCollector(threading.Thread):
             "{.metadata.labels.kueue\\.x-k8s\\.io/priority-class}|"
             "{.status.admission.clusterQueue}|"
             "{range .status.conditions[*]}{.type}={.status},{end}|"
-            "{.spec.podSets[0].count}"
+            "{.spec.podSets[0].count}|"
+            "{.spec.podSets[0].template.spec.containers[0].resources.requests.nvidia\\.com/gpu}"
             "{\"\\n\"}{end}"
         )
         all_workloads = []
@@ -641,20 +647,14 @@ def scrape_pod(context: str, namespace: str, pod: str) -> dict:
 # Each request starts with a unique random prefix so prefix-cache blocks are
 # never shared — every request forces real KV-cache block allocation.
 _LOADER_SCRIPT = textwrap.dedent("""
-import threading, json, urllib.request, sys, time, random, string
+import asyncio, json, sys, random, string, itertools
 
-TARGETS    = sys.argv[1].split(",")   # comma-separated host:port or single host
+TARGETS    = sys.argv[1].split(",")
 WORKERS    = int(sys.argv[2])
 MAX_TOKENS = int(sys.argv[3])
 URLS       = [f"http://{t}/v1/completions" for t in TARGETS]
-
-import itertools
-_url_cycle = itertools.cycle(URLS)
-_cycle_lock = __import__("threading").Lock()
-
-def next_url():
-    with _cycle_lock:
-        return next(_url_cycle)
+_url_iter  = itertools.cycle(URLS)
+_url_idx   = 0
 
 TOPICS = [
     "distributed GPU memory allocation and KV-cache paging",
@@ -686,17 +686,13 @@ FILLER = (
 def make_prompt():
     uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=48))
     topic = random.choice(TOPICS)
-    # Unique prefix at the START ensures no KV-cache block is shared
     return f"[REQID:{uid}] Write a detailed 2500-word essay on {topic}.{FILLER}"
 
-def worker(worker_id):
-    # Stagger startup: each worker waits a random fraction of the expected
-    # request duration so they don't all fire and complete in lockstep.
-    # With 4096 tokens at ~30 tok/s per pod, a request takes ~130s.
-    # Spread workers across a 60s window for steady-state overlap.
-    time.sleep(random.uniform(0, min(60, WORKERS * 0.04)))
+async def worker(wid, session):
+    # Stagger startup over 5s
+    await asyncio.sleep(random.uniform(0, 5))
+    url_idx = wid % len(URLS)
     while True:
-        # Randomize token count ±25% to desynchronize completion times
         tokens = max(256, int(MAX_TOKENS * random.uniform(0.75, 1.25)))
         body = json.dumps({
             "model":      "meta-llama/Llama-3.1-8B-Instruct",
@@ -704,17 +700,31 @@ def worker(worker_id):
             "max_tokens": tokens,
             "stream":     False,
         }).encode()
+        url = URLS[url_idx % len(URLS)]
+        url_idx += 1
         try:
-            req = urllib.request.Request(next_url(),
-                data=body, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=300):
-                pass
+            async with session.post(url, data=body,
+                headers={"Content-Type": "application/json"}) as resp:
+                await resp.read()
         except Exception:
-            time.sleep(0.2)
+            await asyncio.sleep(0.1)
 
-threads = [threading.Thread(target=worker, daemon=True, args=(i,)) for i in range(WORKERS)]
-[t.start() for t in threads]
-[t.join() for t in threads]
+async def main():
+    try:
+        import aiohttp
+    except ImportError:
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install",
+                               "-q", "aiohttp"], stdout=subprocess.DEVNULL)
+        import aiohttp
+
+    conn = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=300)
+    async with aiohttp.ClientSession(connector=conn, timeout=timeout) as session:
+        tasks = [asyncio.create_task(worker(i, session)) for i in range(WORKERS)]
+        await asyncio.gather(*tasks)
+
+asyncio.run(main())
 """).strip()
 
 
@@ -732,11 +742,23 @@ def ensure_load_pod(context: str, namespace: str, pod_name: str,
             "--ignore-not-found", "--wait=false", context=context)
     time.sleep(1)
 
+    overrides = json.dumps({
+        "spec": {"containers": [{
+            "name": pod_name,
+            "image": "python:3.11-slim",
+            "command": ["sleep", "3600"],
+            "resources": {
+                "requests": {"cpu": "2", "memory": "2Gi"},
+                "limits": {"cpu": "4", "memory": "4Gi"},
+            },
+        }]},
+    })
     _, rc = kubectl(
         "run", pod_name,
         "--image=python:3.11-slim",
         "-n", namespace,
         "--restart=Never",
+        f"--overrides={overrides}",
         "--command", "--",
         "sleep", "3600",
         context=context,
@@ -752,6 +774,17 @@ def ensure_load_pod(context: str, namespace: str, pod_name: str,
             return True
         time.sleep(2)
     return False
+
+
+def ensure_load_pods(context: str, namespace: str, base_name: str,
+                     count: int, console: Console) -> List[str]:
+    """Create multiple load pods, return list of ready pod names."""
+    ready = []
+    for i in range(count):
+        name = f"{base_name}-{i}"
+        if ensure_load_pod(context, namespace, name, console):
+            ready.append(name)
+    return ready
 
 
 def launch_load_in_pod(context: str, namespace: str, pod_name: str,
@@ -773,6 +806,20 @@ def launch_load_in_pod(context: str, namespace: str, pod_name: str,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def launch_load_in_pods(context: str, namespace: str, pod_names: List[str],
+                        vip: str, concurrency: int, max_tokens: int,
+                        console: Console) -> List[subprocess.Popen]:
+    """Split concurrency across multiple load pods and launch them all."""
+    per_pod = concurrency // len(pod_names)
+    remainder = concurrency % len(pod_names)
+    procs = []
+    for i, name in enumerate(pod_names):
+        c = per_pod + (1 if i < remainder else 0)
+        procs.append(launch_load_in_pod(context, namespace, name,
+                                        vip, c, max_tokens, console))
+    return procs
 
 
 # ── Metrics collection thread ──────────────────────────────────────────────────
@@ -1187,10 +1234,10 @@ class Dashboard:
         events_text = Text()
         # Debug: log what the renderer sees
         with open("/tmp/kueue_events_debug.log", "a") as dbg:
-            dbg.write(f"  [RENDER] events count={len(events)}, last4={events[-4:] if events else []}\n")
+            dbg.write(f"  [RENDER] events count={len(events)}, last4={events[-8:] if events else []}\n")
         if events:
             events_text.append(f"\n  Recent events ({len(events)} total):\n", style="bold dim")
-            for ev in events[-4:]:
+            for ev in events[-8:]:
                 if "PREEMPTED" in ev:
                     events_text.append(f"  {ev}\n", style="bold red")
                 elif "RESCHEDULED" in ev:
@@ -1223,39 +1270,75 @@ class Dashboard:
 
     def _stats_panel(self) -> Panel:
         t = Text()
-        if not self.load_active:
-            t.append("  Dashboard-only mode ", style="cyan bold")
-            t.append("— no load generator running.  ", style="dim")
-            t.append(f"VIP: {self.vip}   ", style="dim")
-            t.append("Metrics are live from cluster pods.", style="dim")
-            return Panel(t, title="Monitor  [dim](--mode dashboard)[/dim]",
-                         border_style="dim", expand=True)
 
-        s = self.stats
-        is_direct = self.load_target != self.vip
-        t.append(f"  Load → ", style="dim")
-        if is_direct:
-            t.append(f"{self.load_target}", style="yellow")
-            t.append(f"  (east1 direct — LB VIP: {self.vip})   ", style="dim")
+        # Compute fleet-wide running requests and RPS from pod metrics
+        total_running = 0
+        total_waiting = 0
+        total_success = 0.0
+        per_cluster = {}
+        for cname, cm in self.clusters.items():
+            with cm._lock:
+                pods = list(cm.pods)
+            c_run = sum(p.running for p in pods)
+            c_wait = sum(p.waiting for p in pods)
+            c_succ = sum(p.success_total for p in pods)
+            total_running += c_run
+            total_waiting += c_wait
+            total_success += c_succ
+            label = cname.replace("us-", "")
+            per_cluster[label] = (c_run, c_wait, len(pods))
+        fleet_rps = self.stats.rps
+
+        if self.load_active:
+            # Internal load generator mode — show load gen stats
+            s = self.stats
+            is_direct = self.load_target != self.vip
+            t.append(f"  Load → ", style="dim")
+            if is_direct:
+                t.append(f"{self.load_target}", style="yellow")
+                t.append(f"  (east1 direct — LB VIP: {self.vip})   ", style="dim")
+            else:
+                t.append(f"{self.vip}   ", style="dim")
+            t.append(f"Concurrency: {self.concurrency}   ", style="cyan")
+            t.append(f"Success: {s.success:,}   ", style="green")
+            t.append(f"Errors: {s.errors:,}   ",
+                     style="bold red" if s.errors else "dim")
+            t.append(f"RPS ≈ {s.rps:.1f}", style="yellow")
+            if is_direct:
+                t.append(
+                    f"\n  [dim]Direct load fills east1 KV cache. "
+                    f"Once east1 > {KV_THRESHOLD*100:.0f}%, GCP LB routes new VIP "
+                    f"traffic to west3 (metric propagation ~10–60 s)[/dim]"
+                )
+            else:
+                t.append(
+                    f"\n  [dim]Load via VIP — LB distributes across both regions. "
+                    f"Run with --direct-ip 34.118.238.239:8000 to fill east1 first.[/dim]"
+                )
+        elif total_running > 0:
+            # External load detected — show live metrics from pod scraping
+            t.append("  External load detected  ", style="bold green")
+            t.append(f"VIP: {self.vip}\n", style="dim")
+            t.append(f"  Running: ", style="dim")
+            t.append(f"{total_running:,}", style="bold cyan")
+            t.append(f"  Waiting: ", style="dim")
+            t.append(f"{total_waiting:,}", style="yellow" if total_waiting else "dim")
+            t.append(f"  RPS ≈ ", style="dim")
+            t.append(f"{fleet_rps:.1f}", style="yellow")
+            t.append(f"\n  ", style="dim")
+            for label, (c_run, c_wait, n_pods) in per_cluster.items():
+                style = "red" if label == "east1" else "blue"
+                t.append(f"{label}", style=style)
+                t.append(f": {c_run} running / {c_wait} waiting ({n_pods} pods)   ", style="dim")
         else:
-            t.append(f"{self.vip}   ", style="dim")
-        t.append(f"Concurrency: {self.concurrency}   ", style="cyan")
-        t.append(f"Success: {s.success:,}   ", style="green")
-        t.append(f"Errors: {s.errors:,}   ",
-                 style="bold red" if s.errors else "dim")
-        t.append(f"RPS ≈ {s.rps:.1f}", style="yellow")
-        if is_direct:
-            t.append(
-                f"\n  [dim]Direct load fills east1 KV cache. "
-                f"Once east1 > {KV_THRESHOLD*100:.0f}%, GCP LB routes new VIP "
-                f"traffic to west3 (metric propagation ~10–60 s)[/dim]"
-            )
-        else:
-            t.append(
-                f"\n  [dim]Load via VIP — LB distributes across both regions. "
-                f"Run with --direct-ip 34.118.238.239:8000 to fill east1 first.[/dim]"
-            )
-        return Panel(t, title="Load Generator", border_style="dim", expand=True)
+            # No load
+            t.append("  Waiting for load  ", style="dim bold")
+            t.append(f"— monitoring {self.vip}  ", style="dim")
+            t.append("Metrics are live from cluster pods.", style="dim")
+
+        title = "Load Generator" if self.load_active else "Monitor"
+        border = "green" if total_running > 0 else "dim"
+        return Panel(t, title=title, border_style=border, expand=True)
 
     def render(self) -> Layout:
         self._update_history()
@@ -1268,14 +1351,14 @@ class Dashboard:
             with self.kueue_state._lock:
                 n_wl = len(self.kueue_state.workloads)
                 n_ev = len(self.kueue_state.events)
-            kueue_rows = max(12, n_wl + max(n_ev, 6) + 15)
+            kueue_rows = max(12, n_wl + max(n_ev, 10) + 15)
 
         layout = Layout()
         layout.split_column(
             Layout(name="header",   size=3),
             Layout(name="clusters", size=14),
             Layout(name="routing",  size=9),
-            *([ Layout(name="kueue", size=kueue_rows) ] if has_kueue else []),
+            *([ Layout(name="kueue") ] if has_kueue else []),  # takes remaining space
             Layout(name="stats",    size=5),
         )
         layout["header"].update(Panel(
@@ -1355,6 +1438,8 @@ def main():
                         help="Which cluster to run the load generator in and target directly "
                              "(default east1). Use west3 to validate Kueue preemption: "
                              "fills west3 KV cache → HPA scales → preempts training jobs.")
+    parser.add_argument("--load-pods", type=int, default=4,
+                        help="Number of load generator pods to spread concurrency across (default 4)")
     parser.add_argument("--mode", default="both", choices=["dashboard", "load", "both"],
                         help="dashboard = live UI only (no load generated), "
                              "load = generate load with periodic text stats (no Rich UI), "
@@ -1380,7 +1465,7 @@ def main():
 
     # Load generator runs inside the target cluster for geographic affinity
     load_context = CLUSTER_CONFIGS[target_cluster]["context"]
-    load_pod_name = f"kv-load-gen-{args.target_cluster}"
+    load_pod_base = f"kv-load-gen-{args.target_cluster}"
 
     run_load      = args.mode in ("load", "both")
     run_dashboard = args.mode in ("dashboard", "both")
@@ -1395,13 +1480,18 @@ def main():
         f"target=[cyan]{args.target_cluster}[/cyan]\n"
     )
 
-    # ── Setup load pod (skip in dashboard-only mode) ──────────────────────────
-    loader_proc = None
+    # ── Setup load pods (skip in dashboard-only mode) ─────────────────────────
+    loader_procs: List[subprocess.Popen] = []
+    load_pod_names: List[str] = []
     load_target = args.vip
 
     if run_load:
-        if not ensure_load_pod(load_context, LOAD_NAMESPACE, load_pod_name, console):
-            console.print("[bold red]Failed to create load generator pod — aborting[/bold red]")
+        load_pod_names = ensure_load_pods(
+            load_context, LOAD_NAMESPACE, load_pod_base,
+            args.load_pods, console,
+        )
+        if not load_pod_names:
+            console.print("[bold red]Failed to create load generator pods — aborting[/bold red]")
             sys.exit(1)
 
         # Determine load target
@@ -1418,8 +1508,12 @@ def main():
                 f"→ saturates {args.target_cluster} → GCLB spills to {spill_label}"
             )
 
-        loader_proc = launch_load_in_pod(
-            load_context, LOAD_NAMESPACE, load_pod_name,
+        console.print(
+            f"[green]Splitting {args.concurrency} workers across "
+            f"{len(load_pod_names)} pods[/green]"
+        )
+        loader_procs = launch_load_in_pods(
+            load_context, LOAD_NAMESPACE, load_pod_names,
             load_target, args.concurrency, args.max_tokens, console,
         )
 
@@ -1456,14 +1550,16 @@ def main():
         if prober:
             prober.stop()
         kueue_collector.stop()
-        if loader_proc and loader_proc.poll() is None:
-            loader_proc.terminate()
+        for proc in loader_procs:
+            if proc.poll() is None:
+                proc.terminate()
         if run_load:
-            kubectl(
-                "delete", "pod", load_pod_name, "-n", LOAD_NAMESPACE,
-                "--ignore-not-found", "--wait=false",
-                context=load_context,
-            )
+            for pname in load_pod_names:
+                kubectl(
+                    "delete", "pod", pname, "-n", LOAD_NAMESPACE,
+                    "--ignore-not-found", "--wait=false",
+                    context=load_context,
+                )
         console.print("[green]Done.[/green]")
         sys.exit(0)
 

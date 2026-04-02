@@ -62,7 +62,7 @@ spec:
 
               def worker(worker_id):
                   # Stagger startup across 60s window
-                  time.sleep(random.uniform(0, 60))
+                  time.sleep(random.uniform(0, 15))
                   while True:
                       tokens = max(256, int(MAX_TOKENS * random.uniform(0.75, 1.25)))
                       body = json.dumps({

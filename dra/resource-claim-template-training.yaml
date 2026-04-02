@@ -1,0 +1,14 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: single-gpu-claim
+  namespace: training-jobs
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            allocationMode: ExactCount
+            count: 1
