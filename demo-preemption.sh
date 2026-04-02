@@ -4,9 +4,10 @@
 # critical job priority escalation across multi-cluster GPU fleet.
 #
 # Flow:
-#   1. Submit 30 low-priority 1-GPU experiments (60s each)
-#   2. Start load test → HPA scales inference → evicts experiments
-#   3. Submit 1 critical 3-GPU pre-training job that preempts inference
+#   1a. Submit pre-training job (2 replicas x 2 GPUs, 10min)
+#   1b. Submit 40 low-priority 1-GPU experiments (60s each)
+#   2.  Start load test → HPA scales inference → evicts experiments
+#   3.  Submit second pre-training job that preempts inference
 #
 # Kueue orchestration details are shown in the load_test.py dashboard.
 #
@@ -81,18 +82,28 @@ cleanup_bad_pods() {
 do_cleanup() {
   echo ""
   echo -e "${YELLOW}Cleaning up...${NC}"
-  # Kill load test if running
+  # Kill load test process tree if running
   if [ -n "$LOAD_TEST_PID" ] && kill -0 "$LOAD_TEST_PID" 2>/dev/null; then
     echo -e "  ${DIM}Stopping load test (PID: $LOAD_TEST_PID)...${NC}"
-    kill "$LOAD_TEST_PID" 2>/dev/null || true
+    kill -- -"$LOAD_TEST_PID" 2>/dev/null || kill "$LOAD_TEST_PID" 2>/dev/null || true
     wait "$LOAD_TEST_PID" 2>/dev/null || true
   fi
+  # Delete load generator pods
+  echo -e "  ${DIM}Deleting load generator pods...${NC}"
+  for ctx in worker-east1 worker-west3; do
+    kubectl delete pods -n inference-server --context $ctx -l run --field-selector=status.phase=Running --ignore-not-found=true 2>/dev/null &
+    for i in $(seq 0 7); do
+      kubectl delete pod "kv-load-gen-east1-$i" "kv-load-gen-west3-$i" -n inference-server --context $ctx --ignore-not-found=true 2>/dev/null &
+    done
+  done
   # Delete all jobs
   echo -e "  ${DIM}Deleting experiment and pre-training jobs...${NC}"
   for i in $(seq 1 40); do
     kubectl delete jobset "experiment-$i" -n training-jobs --context mgmt --ignore-not-found=true 2>/dev/null &
   done
   kubectl delete jobset "pre-training-1" -n training-jobs --context mgmt --ignore-not-found=true 2>/dev/null &
+  kubectl delete jobset "pre-training-1" -n training-jobs --context worker-east1 --ignore-not-found=true 2>/dev/null &
+  kubectl delete jobset "pre-training-2" -n training-jobs --context mgmt --ignore-not-found=true 2>/dev/null &
   wait
   # Clean up bad pods
   cleanup_bad_pods
@@ -111,15 +122,19 @@ trap '' EXIT INT TERM  # overridden below after pre-flight
 show_gpu_state() {
   for ctx in worker-east1 worker-west3; do
     label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+    # Inference pods: 1 GPU each
     inf=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
-    train=$(kubectl get pods -n training-jobs --context $ctx --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
-    free=$((8 - inf - train))
+    # Training pods: sum actual GPU requests (some pods request >1 GPU)
+    train_gpus=$(kubectl get pods -n training-jobs --context $ctx --field-selector=status.phase=Running \
+      -o jsonpath='{range .items[*]}{.spec.containers[0].resources.requests.nvidia\.com/gpu}{"\n"}{end}' 2>/dev/null \
+      | awk '{s+=$1} END {print s+0}')
+    free=$((8 - inf - train_gpus))
     [ $free -lt 0 ] && free=0
     bar=""
     for i in $(seq 1 $inf); do bar="${bar}${CYAN}█${NC}"; done
-    for i in $(seq 1 $train); do bar="${bar}${MAGENTA}█${NC}"; done
+    for i in $(seq 1 $train_gpus); do bar="${bar}${MAGENTA}█${NC}"; done
     for i in $(seq 1 $free); do bar="${bar}░"; done
-    echo -e "  ${BOLD}$label${NC}  [${bar}]  ${CYAN}${inf}i${NC} ${MAGENTA}${train}t${NC} ${DIM}${free} free${NC}"
+    echo -e "  ${BOLD}$label${NC}  [${bar}]  ${CYAN}${inf}i${NC} ${MAGENTA}${train_gpus}t${NC} ${DIM}${free} free${NC}"
   done
   echo -e "  ${DIM}Legend: ${CYAN}█${NC}${DIM}=inference ${MAGENTA}█${NC}${DIM}=training ░=free${NC}"
 }
@@ -128,7 +143,8 @@ show_gpu_state() {
 submit_small_job() {
   local job_name=$1
   local job_num=$2
-  cat <<EOF | kubectl apply --context mgmt -f - 2>&1 | grep -v "^$"
+  kubectl delete jobset "$job_name" -n training-jobs --context mgmt --ignore-not-found=true 2>/dev/null
+  cat <<EOF | kubectl create --context mgmt -f - 2>&1 | grep -v "^$"
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
@@ -177,13 +193,16 @@ spec:
 EOF
 }
 
-# ── Helper: submit pre-training job (3 GPU, 2min) ────────────────────────────
+# ── Helper: submit pre-training job (6 replicas x 1 GPU each, 10min) ────────
 submit_critical_job() {
-  cat <<EOF | kubectl apply --context mgmt -f - 2>&1 | grep -v "^$"
+  local job_name=${1:-pre-training-1}
+  local ctx=${2:-mgmt}
+  kubectl delete jobset "$job_name" -n training-jobs --context "$ctx" --ignore-not-found=true 2>/dev/null
+  cat <<EOF | kubectl create --context "$ctx" -f - 2>&1 | grep -v "^$"
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: pre-training-1
+  name: $job_name
   namespace: training-jobs
   labels:
     kueue.x-k8s.io/queue-name: training-queue
@@ -191,7 +210,7 @@ metadata:
 spec:
   replicatedJobs:
     - name: worker
-      replicas: 3
+      replicas: 6
       template:
         spec:
           parallelism: 1
@@ -214,10 +233,10 @@ spec:
                   command: ["bash", "-c"]
                   args:
                     - |
-                      echo "=== Pre-Training Job (3 GPUs) ==="
+                      echo "=== Pre-Training Job (1 GPU) ==="
                       nvidia-smi
-                      echo "Pre-training for 2 minutes..."
-                      sleep 120
+                      echo "Pre-training for 10 minutes..."
+                      sleep 600
                       echo "Pre-training complete."
                   resources:
                     requests:
@@ -232,12 +251,33 @@ EOF
 # PRE-FLIGHT: clean up bad pods before starting
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo -e "${DIM}Pre-flight: checking for stuck or crash-looping inference pods...${NC}"
+echo -e "${DIM}Pre-flight: cleaning up leftover resources from previous runs...${NC}"
+# Delete leftover load gen pods
+for ctx in worker-east1 worker-west3; do
+  for i in $(seq 0 7); do
+    kubectl delete pod "kv-load-gen-east1-$i" "kv-load-gen-west3-$i" -n inference-server --context $ctx --ignore-not-found=true 2>/dev/null &
+  done
+done
+# Delete leftover jobs
+for i in $(seq 1 40); do
+  kubectl delete jobset "experiment-$i" -n training-jobs --context mgmt --ignore-not-found=true 2>/dev/null &
+done
+kubectl delete jobset "pre-training-1" -n training-jobs --context mgmt --ignore-not-found=true 2>/dev/null &
+kubectl delete jobset "pre-training-1" -n training-jobs --context worker-east1 --ignore-not-found=true 2>/dev/null &
+kubectl delete jobset "pre-training-2" -n training-jobs --context mgmt --ignore-not-found=true 2>/dev/null &
+wait
+# Clean up bad inference pods
 cleanup_bad_pods
+# Reset HPAs and scale
+kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-east1 2>/dev/null || true
+kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-west3 2>/dev/null || true
+kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-east1 2>/dev/null || true
+kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-west3 2>/dev/null || true
+echo -e "${GREEN}Pre-flight complete.${NC}"
 echo ""
 
-# Now set the trap — on unexpected exit (Ctrl-C), prompt for cleanup
-trap 'echo ""; echo -e "${YELLOW}Interrupted.${NC}"; echo -n "Run cleanup? [Y/n] "; read -r ans; case "$ans" in [nN]*) echo -e "${DIM}Skipped cleanup.${NC}" ;; *) do_cleanup ;; esac; exit 1' INT TERM
+# On Ctrl-C or SIGTERM, always clean up
+trap 'echo ""; echo -e "${YELLOW}Interrupted — running cleanup...${NC}"; do_cleanup; exit 1' INT TERM
 trap '' EXIT
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,9 +303,21 @@ show_gpu_state
 
 pause 4
 
-# ── Step 1: Submit 20 low-priority experiments ────────────────────────────────
+# ── Step 1a: Submit initial pre-training job ─────────────────────────────────
 
-narrate "Step 1: Scheduling 40 low-priority experiments (1 GPU each, 60s duration)"
+narrate "Step 1a: Submitting pre-training job (6 replicas x 1 GPU, 10min duration)"
+echo -e "  ${DIM}Priority: training-critical (2000) — will hold GPUs through the demo${NC}"
+echo ""
+
+submit_critical_job "pre-training-1" "worker-east1"
+echo ""
+echo -e "  ${GREEN}✓${NC} pre-training-1 submitted to east1"
+
+pause 4
+
+# ── Step 1b: Submit low-priority experiments ─────────────────────────────────
+
+narrate "Step 1b: Scheduling 40 low-priority experiments (1 GPU each, 60s duration)"
 echo -e "  ${DIM}Submitting to management cluster → MultiKueue distributes across fleet${NC}"
 echo ""
 
@@ -286,10 +338,10 @@ pause 4
 # ── Step 2: Start load test ──────────────────────────────────────────────────
 
 narrate "Step 2: Starting inference load test → HPA will scale up and evict experiments"
-echo -e "  ${DIM}Launching load_test.py (concurrency=3000, max-tokens=512, target=east1)${NC}"
+echo -e "  ${DIM}Launching load_test.py (concurrency=12000, max-tokens=768, target=east1)${NC}"
 echo ""
 
-python3 "$SCRIPT_DIR/load_test.py" --concurrency 3000 --max-tokens 512 --target-cluster east1 --mode load >/dev/null 2>&1 &
+setsid python3 "$SCRIPT_DIR/load_test.py" --concurrency 12000 --max-tokens 768 --target-cluster east1 --mode load >/dev/null 2>&1 &
 LOAD_TEST_PID=$!
 
 echo -e "  ${GREEN}✓${NC} Load test started"
@@ -307,17 +359,26 @@ done
 
 pause 4
 
-# ── Step 3: Submit critical 3-GPU job ────────────────────────────────────────
+# ── Step 3: Reduce load and submit critical job ─────────────────────────────
 
-narrate "Step 3: Submitting critical 3-GPU pre-training job (priority > inference)"
+# Kill existing load test and restart at lower concurrency
+if [ -n "$LOAD_TEST_PID" ] && kill -0 "$LOAD_TEST_PID" 2>/dev/null; then
+  kill -- -"$LOAD_TEST_PID" 2>/dev/null || kill "$LOAD_TEST_PID" 2>/dev/null || true
+  wait "$LOAD_TEST_PID" 2>/dev/null || true
+fi
+echo -e "  ${DIM}Reducing load to 3000 concurrency...${NC}"
+setsid python3 "$SCRIPT_DIR/load_test.py" --concurrency 3000 --max-tokens 768 --target-cluster east1 --mode load >/dev/null 2>&1 &
+LOAD_TEST_PID=$!
+
+narrate "Step 3: Submitting second critical pre-training job (priority > inference)"
 echo -e "  ${DIM}Priority: training-critical (2000) > inference-high (1000) > training-low (100)${NC}"
 echo -e "  ${DIM}Kueue will preempt inference servers to make room for pre-training${NC}"
 echo ""
 
-submit_critical_job
+submit_critical_job "pre-training-2"
 echo ""
 
-echo -e "  ${DIM}Waiting for pre-training job to be admitted...${NC}"
+echo -e "  ${DIM}Waiting for pre-training-2 to be admitted...${NC}"
 for tick in $(seq 1 8); do
   sleep 15
   echo ""
@@ -325,11 +386,11 @@ for tick in $(seq 1 8); do
   show_gpu_state
   # Check if critical job pods are running
   for ctx in worker-east1 worker-west3; do
-    count=$(kubectl get pods -n training-jobs --context $ctx -l "jobset.sigs.k8s.io/jobset-name=pre-training-1" --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
-    if [ "$count" -ge 3 ]; then
+    count=$(kubectl get pods -n training-jobs --context $ctx -l "jobset.sigs.k8s.io/jobset-name=pre-training-2" --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
+    if [ "$count" -ge 6 ]; then
       label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
       echo ""
-      echo -e "  ${GREEN}✓${NC} ${RED}${BOLD}pre-training-1${NC} running on ${BOLD}$label${NC} — 3 GPUs claimed, inference preempted"
+      echo -e "  ${GREEN}✓${NC} ${RED}${BOLD}pre-training-2${NC} running on ${BOLD}$label${NC} — 6 GPUs claimed, inference preempted"
       break 2
     fi
   done
