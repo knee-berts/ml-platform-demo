@@ -15,4 +15,4 @@ spec:
         - name: rtx-pro-6000
           resources:
             - name: "nvidia.com/gpu"
-              nominalQuota: 8
+              nominalQuota: 16
