@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-load_test.py — KV-Cache Spillover & Kueue Preemption Demo
+load_test.py — KV-Cache Spillover, Flow Control & Kueue Preemption Demo
 
 Saturates east1's KV cache past the 60% GCPBackendPolicy threshold,
 then watches live as the multi-cluster LB shifts traffic to west3.
 Also monitors Kueue workloads on west3 — shows training jobs being
 preempted as inference scales out to claim GPU capacity.
+
+Supports EPP flow control: sends x-gateway-inference-objective and
+x-gateway-inference-fairness-id headers, and scrapes EPP queue metrics.
 
 Usage:
     python3 load_test.py [--mode dashboard|load|both] [--vip IP] [--concurrency N] [--max-tokens N]
@@ -97,6 +100,37 @@ class ClusterMetrics:
     def update(self, new_pods: List[PodMetrics]):
         with self._lock:
             self.pods = new_pods
+
+
+@dataclass
+class EppMetrics:
+    """Flow control metrics scraped from the EPP pod."""
+    cluster: str = ""
+    queue_size: int = 0          # requests buffered in EPP flow control queue
+    queue_duration_p50: float = 0.0  # median queue wait (seconds)
+    saturated: bool = False      # whether the saturation detector has tripped
+    error: str = ""
+    ts: float = field(default_factory=time.time)
+
+
+@dataclass
+class EppState:
+    """Per-cluster EPP flow control state."""
+    metrics: Dict[str, EppMetrics] = field(default_factory=dict)  # cluster -> EppMetrics
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def update(self, cluster: str, m: EppMetrics):
+        with self._lock:
+            self.metrics[cluster] = m
+
+    def get(self, cluster: str) -> Optional[EppMetrics]:
+        with self._lock:
+            return self.metrics.get(cluster)
+
+    @property
+    def total_queued(self) -> int:
+        with self._lock:
+            return sum(m.queue_size for m in self.metrics.values())
 
 
 @dataclass
@@ -519,12 +553,14 @@ class VipProber(threading.Thread):
     def __init__(self, clusters: Dict[str, "ClusterMetrics"],
                  probe_stats: ProbeStats,
                  spill_cluster: str,
-                 vip: str = DEFAULT_VIP):
+                 vip: str = DEFAULT_VIP,
+                 objective: str = "food-review-prod"):
         super().__init__(daemon=True)
         self.clusters = clusters
         self.probe_stats = probe_stats
         self.spill_cluster = spill_cluster
         self.vip = vip
+        self.objective = objective
         self._stop = threading.Event()
 
     def stop(self):
@@ -539,7 +575,11 @@ class VipProber(threading.Thread):
         }).encode()
         try:
             req = urllib.request.Request(
-                url, data=body, headers={"Content-Type": "application/json"})
+                url, data=body, headers={
+                    "Content-Type": "application/json",
+                    "x-gateway-inference-objective": self.objective,
+                    "x-gateway-inference-fairness-id": "probe",
+                })
             with urllib.request.urlopen(req, timeout=15):
                 self.probe_stats.inc()
         except Exception:
@@ -676,6 +716,71 @@ def scrape_pod(context: str, namespace: str, pod: str) -> dict:
     }
 
 
+def _get_epp_bearer_token(context: str, namespace: str) -> str:
+    """Retrieve the bearer token for EPP metrics auth from the metrics-reader secret."""
+    out, rc = kubectl(
+        "get", "secret", "-n", namespace,
+        "vllm-llama3-8b-instruct-metrics-reader-secret",
+        "-o", "jsonpath={.data.token}",
+        context=context, timeout=10,
+    )
+    if rc != 0 or not out:
+        return ""
+    import base64
+    try:
+        return base64.b64decode(out).decode()
+    except Exception:
+        return ""
+
+
+# Cache bearer tokens per context to avoid repeated secret lookups
+_epp_token_cache: Dict[str, str] = {}
+
+
+def scrape_epp(context: str, namespace: str) -> EppMetrics:
+    """Scrape flow control metrics from the EPP via a vLLM pod.
+
+    The EPP runs in a distroless container (no curl/wget), so we exec curl
+    from a vLLM pod to reach the EPP service's metrics endpoint.
+    The EPP metrics endpoint requires a bearer token (from the metrics-reader secret).
+    """
+    vllm_pods = get_vllm_pods(context, namespace)
+    if not vllm_pods:
+        return EppMetrics(error="no vllm pods")
+
+    # Get/cache bearer token
+    if context not in _epp_token_cache:
+        _epp_token_cache[context] = _get_epp_bearer_token(context, namespace)
+    token = _epp_token_cache[context]
+    if not token:
+        return EppMetrics(error="no auth token")
+
+    out, rc = kubectl(
+        "exec", "-n", namespace, vllm_pods[0], "--",
+        "curl", "-s", "--max-time", "5",
+        "-H", f"Authorization: Bearer {token}",
+        f"http://vllm-llama3-8b-instruct-epp.{namespace}.svc:9090/metrics",
+        context=context, timeout=10,
+    )
+    if rc != 0:
+        return EppMetrics(error=(out[:60] if out else "scrape failed"))
+
+    queue_size = parse_prom(out, "inference_extension_flow_control_queue_size")
+    queue_dur = parse_prom(out, "inference_extension_flow_control_request_queue_duration_seconds_sum")
+    queue_cnt = parse_prom(out, "inference_extension_flow_control_request_queue_duration_seconds_count")
+    saturated_val = parse_prom(out, "inference_extension_flow_control_saturated")
+
+    avg_dur = 0.0
+    if queue_dur is not None and queue_cnt and queue_cnt > 0:
+        avg_dur = queue_dur / queue_cnt
+
+    return EppMetrics(
+        queue_size=int(queue_size or 0),
+        queue_duration_p50=avg_dur,
+        saturated=bool(saturated_val and saturated_val > 0),
+    )
+
+
 # ── Load generator pod ─────────────────────────────────────────────────────────
 
 # Minimal Python load-gen script injected via `kubectl exec python3 -c ...`
@@ -688,6 +793,7 @@ import asyncio, json, sys, random, string, itertools
 TARGETS    = sys.argv[1].split(",")
 WORKERS    = int(sys.argv[2])
 MAX_TOKENS = int(sys.argv[3])
+OBJECTIVE  = sys.argv[4] if len(sys.argv) > 4 else "food-review-prod"
 URLS       = [f"http://{t}/v1/completions" for t in TARGETS]
 _url_iter  = itertools.cycle(URLS)
 _url_idx   = 0
@@ -728,6 +834,8 @@ async def worker(wid, session):
     # Stagger startup over 5s
     await asyncio.sleep(random.uniform(0, 5))
     url_idx = wid % len(URLS)
+    # Each worker gets a stable fairness ID so the EPP can enforce per-tenant fairness
+    fairness_id = f"tenant-{wid % 8}"
     while True:
         tokens = max(256, int(MAX_TOKENS * random.uniform(0.75, 1.25)))
         body = json.dumps({
@@ -740,7 +848,11 @@ async def worker(wid, session):
         url_idx += 1
         try:
             async with session.post(url, data=body,
-                headers={"Content-Type": "application/json"}) as resp:
+                headers={
+                    "Content-Type": "application/json",
+                    "x-gateway-inference-objective": OBJECTIVE,
+                    "x-gateway-inference-fairness-id": fairness_id,
+                }) as resp:
                 await resp.read()
         except Exception:
             await asyncio.sleep(0.1)
@@ -825,17 +937,19 @@ def ensure_load_pods(context: str, namespace: str, base_name: str,
 
 def launch_load_in_pod(context: str, namespace: str, pod_name: str,
                        vip: str, concurrency: int, max_tokens: int,
-                       console: Console) -> subprocess.Popen:
+                       console: Console,
+                       objective: str = "food-review-prod") -> subprocess.Popen:
     """Start the loader script inside the pod as a background Popen process."""
     console.log(
         f"[green]Launching {concurrency} workers inside pod "
-        f"[bold]{pod_name}[/bold] → [bold]{vip}[/bold][/green]"
+        f"[bold]{pod_name}[/bold] → [bold]{vip}[/bold] "
+        f"(objective={objective})[/green]"
     )
     cmd = [
         "kubectl", "--context", context,
         "exec", "-n", namespace, pod_name, "--",
         "python3", "-c", _LOADER_SCRIPT,
-        vip, str(concurrency), str(max_tokens),
+        vip, str(concurrency), str(max_tokens), objective,
     ]
     return subprocess.Popen(
         cmd,
@@ -846,7 +960,8 @@ def launch_load_in_pod(context: str, namespace: str, pod_name: str,
 
 def launch_load_in_pods(context: str, namespace: str, pod_names: List[str],
                         vip: str, concurrency: int, max_tokens: int,
-                        console: Console) -> List[subprocess.Popen]:
+                        console: Console,
+                        objective: str = "food-review-prod") -> List[subprocess.Popen]:
     """Split concurrency across multiple load pods and launch them all."""
     per_pod = concurrency // len(pod_names)
     remainder = concurrency % len(pod_names)
@@ -854,16 +969,19 @@ def launch_load_in_pods(context: str, namespace: str, pod_names: List[str],
     for i, name in enumerate(pod_names):
         c = per_pod + (1 if i < remainder else 0)
         procs.append(launch_load_in_pod(context, namespace, name,
-                                        vip, c, max_tokens, console))
+                                        vip, c, max_tokens, console,
+                                        objective=objective))
     return procs
 
 
 # ── Metrics collection thread ──────────────────────────────────────────────────
 
 class MetricsCollector(threading.Thread):
-    def __init__(self, clusters: Dict[str, ClusterMetrics]):
+    def __init__(self, clusters: Dict[str, ClusterMetrics],
+                 epp_state: Optional[EppState] = None):
         super().__init__(daemon=True)
         self.clusters = clusters
+        self.epp_state = epp_state
         self._stop = threading.Event()
 
     def stop(self):
@@ -877,11 +995,19 @@ class MetricsCollector(threading.Thread):
                 new_pods = []
                 # Scrape pods in parallel
                 results: Dict[str, dict] = {}
+                epp_results: Dict[str, EppMetrics] = {}
                 threads = []
                 for pod in pods:
                     def _scrape(p=pod, c=cfg):
                         results[p] = scrape_pod(c["context"], c["namespace"], p)
                     t = threading.Thread(target=_scrape, daemon=True)
+                    t.start()
+                    threads.append(t)
+                # Scrape EPP in parallel with vLLM pods
+                if self.epp_state:
+                    def _scrape_epp(cn=cname, c=cfg):
+                        epp_results[cn] = scrape_epp(c["context"], c["namespace"])
+                    t = threading.Thread(target=_scrape_epp, daemon=True)
                     t.start()
                     threads.append(t)
                 for t in threads:
@@ -897,6 +1023,11 @@ class MetricsCollector(threading.Thread):
                         error=m.get("error", ""),
                     ))
                 cm.update(new_pods)
+                # Update EPP state
+                if self.epp_state and cname in epp_results:
+                    em = epp_results[cname]
+                    em.cluster = cname
+                    self.epp_state.update(cname, em)
 
 
 # ── Rich dashboard ─────────────────────────────────────────────────────────────
@@ -909,9 +1040,11 @@ class Dashboard:
                  load_target: str = "",
                  probe_stats: Optional[ProbeStats] = None,
                  kueue_state: Optional[KueueState] = None,
+                 epp_state: Optional[EppState] = None,
                  load_active: bool = True,
                  target_cluster: str = "us-east1",
-                 spill_cluster: str = "us-west3"):
+                 spill_cluster: str = "us-west3",
+                 objective: str = "food-review-prod"):
         self.clusters   = clusters
         self.stats      = stats
         self.concurrency = concurrency
@@ -919,9 +1052,11 @@ class Dashboard:
         self.load_target = load_target or vip
         self.probe_stats = probe_stats
         self.kueue_state = kueue_state
+        self.epp_state   = epp_state
         self.load_active = load_active
         self.target_cluster = target_cluster
         self.spill_cluster  = spill_cluster
+        self.objective   = objective
         # Rolling KV history per cluster for the mini sparkline
         self._kv_hist: Dict[str, List[float]] = {c: [] for c in clusters}
         self._last_kv: Dict[str, float] = {c: 0.0 for c in clusters}
@@ -1311,6 +1446,71 @@ class Dashboard:
 
         return Panel(body, title=title, border_style="magenta", expand=True)
 
+    def _epp_panel(self) -> Panel:
+        """EPP flow control status — queue depth and saturation per cluster."""
+        es = self.epp_state
+        if not es:
+            return Panel("[dim]EPP flow control monitoring disabled[/dim]",
+                         title="Flow Control", border_style="dim")
+
+        from rich.console import Group
+
+        t = Text()
+        t.append(f"  Objective: ", style="dim")
+        t.append(f"{self.objective}", style="bold cyan")
+        t.append(f"  │  Fairness IDs: ", style="dim")
+        t.append(f"tenant-0..7", style="cyan")
+        t.append(f"\n", style="dim")
+
+        total_queued = 0
+        any_saturated = False
+        for cname in ["us-east1", "us-west3"]:
+            cfg = CLUSTER_CONFIGS[cname]
+            label = cname.replace("us-", "")
+            m = es.get(cname)
+            t.append(f"\n  {cfg['label']}  ", style=cfg["color"])
+            if m and not m.error:
+                total_queued += m.queue_size
+                if m.saturated:
+                    any_saturated = True
+                # Queue depth bar
+                q = m.queue_size
+                bar_width = 20
+                bar_fill = min(q, bar_width)
+                bar = "█" * bar_fill + "░" * (bar_width - bar_fill)
+                q_style = "bold red" if q > 10 else ("yellow" if q > 0 else "green")
+                t.append(bar, style=q_style)
+                t.append(f"  {q} queued", style=q_style)
+                if m.queue_duration_p50 > 0:
+                    t.append(f"  avg wait: {m.queue_duration_p50:.2f}s", style="dim")
+                if m.saturated:
+                    t.append(f"  ⚠ SATURATED", style="bold red")
+                else:
+                    t.append(f"  ready", style="green")
+            elif m and m.error:
+                t.append(m.error, style="dim")
+            else:
+                t.append("no data", style="dim")
+
+        # Summary line
+        t.append(f"\n\n  ", style="dim")
+        if any_saturated:
+            t.append(
+                "EPP holding requests — protecting TPOT.  "
+                "Higher-priority requests dispatch first.",
+                style="bold yellow",
+            )
+        elif total_queued > 0:
+            t.append(
+                f"{total_queued} requests in EPP queue — dispatching by priority",
+                style="cyan",
+            )
+        else:
+            t.append("All requests dispatching immediately — pool has capacity", style="green")
+
+        return Panel(t, title="EPP Flow Control  [dim]│  Tier 2 request scheduling[/dim]",
+                     border_style="cyan", expand=True)
+
     def _stats_panel(self) -> Panel:
         t = Text()
 
@@ -1387,6 +1587,7 @@ class Dashboard:
         self._update_history()
 
         has_kueue = self.kueue_state is not None
+        has_epp = self.epp_state is not None
         # Size the kueue panel based on workload count:
         # header(2) + table rows + HPA line(1) + training summary(1) + events(~4) + borders(3)
         kueue_rows = 11  # minimum
@@ -1401,11 +1602,12 @@ class Dashboard:
             Layout(name="header",   size=3),
             Layout(name="clusters", size=14),
             Layout(name="routing",  size=9),
+            *([ Layout(name="epp", size=10) ] if has_epp else []),
             *([ Layout(name="kueue") ] if has_kueue else []),  # takes remaining space
             Layout(name="stats",    size=5),
         )
         layout["header"].update(Panel(
-            "[bold white]KV-Cache Spillover & Kueue Preemption Demo[/bold white]  "
+            "[bold white]KV-Cache Spillover, Flow Control & Kueue Preemption Demo[/bold white]  "
             "[dim]│  GKE Multi-Cluster Inference Gateway  │  "
             f"Threshold: {KV_THRESHOLD*100:.0f}%  │  "
             "Ctrl-C to stop[/dim]",
@@ -1415,6 +1617,8 @@ class Dashboard:
             Layout(self._cluster_panel("us-west3"), name="west"),
         )
         layout["routing"].update(self._routing_panel())
+        if has_epp:
+            layout["epp"].update(self._epp_panel())
         if has_kueue:
             layout["kueue"].update(self._kueue_panel())
         layout["stats"].update(self._stats_panel())
@@ -1483,6 +1687,9 @@ def main():
                              "fills west3 KV cache → HPA scales → preempts training jobs.")
     parser.add_argument("--load-pods", type=int, default=4,
                         help="Number of load generator pods to spread concurrency across (default 4)")
+    parser.add_argument("--objective", default="food-review-prod",
+                        help="InferenceObjective name sent via x-gateway-inference-objective header "
+                             "(default food-review-prod). Set to 'food-review-batch' for low-priority.")
     parser.add_argument("--mode", default="both", choices=["dashboard", "load", "both"],
                         help="dashboard = live UI only (no load generated), "
                              "load = generate load with periodic text stats (no Rich UI), "
@@ -1515,12 +1722,13 @@ def main():
 
     console = Console()
     console.print(
-        f"\n[bold]KV-Cache Spillover & Kueue Preemption Demo[/bold]  "
+        f"\n[bold]KV-Cache Spillover, Flow Control & Kueue Preemption Demo[/bold]  "
         f"mode=[cyan]{args.mode}[/cyan]  "
         f"vip=[cyan]{args.vip}[/cyan]  "
         f"concurrency=[cyan]{args.concurrency}[/cyan]  "
         f"max_tokens=[cyan]{args.max_tokens}[/cyan]  "
-        f"target=[cyan]{args.target_cluster}[/cyan]\n"
+        f"target=[cyan]{args.target_cluster}[/cyan]  "
+        f"objective=[cyan]{args.objective}[/cyan]\n"
     )
 
     # ── Setup load pods (skip in dashboard-only mode) ─────────────────────────
@@ -1558,6 +1766,7 @@ def main():
         loader_procs = launch_load_in_pods(
             load_context, LOAD_NAMESPACE, load_pod_names,
             load_target, args.concurrency, args.max_tokens, console,
+            objective=args.objective,
         )
 
     # ── Init metrics ──────────────────────────────────────────────────────────
@@ -1567,10 +1776,12 @@ def main():
     stats = LoadStats()
     probe_stats = ProbeStats()
     kueue_state = KueueState()
+    epp_state = EppState()
 
-    collector = MetricsCollector(clusters)
+    collector = MetricsCollector(clusters, epp_state=epp_state)
     counter   = RequestCounter(stats, clusters)
-    prober    = VipProber(clusters, probe_stats, spill_cluster=spill_cluster) if run_load else None
+    prober    = VipProber(clusters, probe_stats, spill_cluster=spill_cluster,
+                         objective=args.objective) if run_load else None
     kueue_collector = KueueCollector(kueue_state)
     collector.start()
     counter.start()
@@ -1581,9 +1792,12 @@ def main():
     dashboard = Dashboard(clusters, stats, args.concurrency, args.vip,
                           load_target=load_target,
                           probe_stats=probe_stats if run_load else None,
-                          kueue_state=kueue_state, load_active=run_load,
+                          kueue_state=kueue_state,
+                          epp_state=epp_state,
+                          load_active=run_load,
                           target_cluster=target_cluster,
-                          spill_cluster=spill_cluster)
+                          spill_cluster=spill_cluster,
+                          objective=args.objective)
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
     def shutdown(sig=None, frame=None):

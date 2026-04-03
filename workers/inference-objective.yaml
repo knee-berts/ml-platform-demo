@@ -1,10 +1,24 @@
+# Production traffic — high priority, served first under contention.
+# Clients set header: x-gateway-inference-fairness-id: <tenant-id>
 apiVersion: inference.networking.x-k8s.io/v1alpha2
 kind: InferenceObjective
 metadata:
-  name: food-review
+  name: food-review-prod
   namespace: inference-server
 spec:
-  priority: 10
+  priority: 100
+  poolRef:
+    name: vllm-llama3-8b-instruct
+    group: "inference.networking.k8s.io"
+---
+# Batch / experiment traffic — low priority, queued behind prod when saturated.
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceObjective
+metadata:
+  name: food-review-batch
+  namespace: inference-server
+spec:
+  priority: -10
   poolRef:
     name: vllm-llama3-8b-instruct
     group: "inference.networking.k8s.io"

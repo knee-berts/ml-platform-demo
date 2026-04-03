@@ -13,7 +13,7 @@ metadata:
   namespace: inference-server
   labels:
     app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
-    app.kubernetes.io/version: "v1.1.0"
+    app.kubernetes.io/version: "v1.4.0"
 ---
 # Source: inferencepool/templates/gke.yaml
 apiVersion: v1
@@ -23,7 +23,7 @@ metadata:
   namespace: inference-server
   labels:
     app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
-    app.kubernetes.io/version: "v1.1.0"
+    app.kubernetes.io/version: "v1.4.0"
   annotations:
     kubernetes.io/service-account.name: vllm-llama3-8b-instruct-metrics-reader-sa
 type: kubernetes.io/service-account-token
@@ -38,10 +38,24 @@ data:
   default-plugins.yaml: |
     apiVersion: inference.networking.x-k8s.io/v1alpha1
     kind: EndpointPickerConfig
+    featureGates:
+    - "flowControl"
     plugins:
     - type: queue-scorer
     - type: kv-cache-utilization-scorer
     - type: prefix-cache-scorer
+    saturationDetector:
+      # Force most queuing into the EPP rather than model server local queues.
+      # Low value = tighter EPP control over dispatch ordering.
+      queueDepthThreshold: 2
+      # Pool considered saturated above 85% KV-cache — EPP holds requests
+      # rather than flooding GPUs, protecting TPOT.
+      kvCacheUtilThreshold: 0.85
+    flowControl:
+      # 1GB HTTP payload buffer — bounds EPP memory, not GPU VRAM.
+      maxBytes: 1000000000
+      # Requests waiting longer than 30s are shed.
+      defaultRequestTTL: 30s
     schedulingProfiles:
     - name: default
       plugins:
@@ -67,7 +81,7 @@ metadata:
   name: "vllm-llama3-8b-instruct-default-epp"
   labels:
     app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
-    app.kubernetes.io/version: "v1.1.0"
+    app.kubernetes.io/version: "v1.4.0"
 rules:
 - apiGroups:
   - authentication.k8s.io
@@ -130,7 +144,7 @@ metadata:
   namespace: inference-server
   labels:
     app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
-    app.kubernetes.io/version: "v1.1.0"
+    app.kubernetes.io/version: "v1.4.0"
 rules:
 - apiGroups: ["inference.networking.x-k8s.io"]
   resources: ["inferenceobjectives"]
@@ -180,7 +194,7 @@ metadata:
   namespace: inference-server
   labels:
     app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
-    app.kubernetes.io/version: "v1.1.0"
+    app.kubernetes.io/version: "v1.4.0"
 spec:
   selector:
     inferencepool: vllm-llama3-8b-instruct-epp
@@ -201,7 +215,7 @@ metadata:
   namespace: inference-server
   labels:
     app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
-    app.kubernetes.io/version: "v1.1.0"
+    app.kubernetes.io/version: "v1.4.0"
 spec:
   replicas: 1
   strategy:
@@ -225,7 +239,7 @@ spec:
       terminationGracePeriodSeconds: 130
       containers:
       - name: epp
-        image: registry.k8s.io/gateway-api-inference-extension/epp:v1.1.0
+        image: registry.k8s.io/gateway-api-inference-extension/epp:v1.4.0
         imagePullPolicy: Always
         args:
         - --pool-name
@@ -287,7 +301,7 @@ metadata:
   namespace: inference-server
   labels:
     app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
-    app.kubernetes.io/version: "v1.1.0"
+    app.kubernetes.io/version: "v1.4.0"
 spec:
   endpoints:
   - port: metrics

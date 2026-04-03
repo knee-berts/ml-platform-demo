@@ -5,7 +5,7 @@ metadata:
   namespace: inference-server
   labels:
     app.kubernetes.io/name: vllm-llama3-8b-instruct-epp
-    app.kubernetes.io/version: "v1.1.0"
+    app.kubernetes.io/version: "v1.4.0"
   annotations:
     networking.gke.io/export: "True"
 spec:
