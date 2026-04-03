@@ -1,0 +1,51 @@
+# West3 spillover region — scales to zero when idle, wakes on flow control queue depth.
+# The EPP buffers incoming HTTP connections while pods cold-start, so no requests are dropped.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vllm-inference-hpa
+  namespace: inference-server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vllm-llama3-8b-instruct
+  minReplicas: 0
+  maxReplicas: 6
+  metrics:
+    # Primary: EPP flow control queue depth — true demand signal that works at zero replicas.
+    # When requests arrive with no backends, the EPP queues them and this metric rises,
+    # triggering scale-from-zero.
+    - type: Object
+      object:
+        describedObject:
+          apiVersion: apps/v1
+          kind: Deployment
+          name: vllm-llama3-8b-instruct-epp
+        metric:
+          name: prometheus.googleapis.com|inference_extension_flow_control_queue_size|gauge
+        target:
+          type: AverageValue
+          averageValue: "1"
+    # Secondary: KV-cache utilization for scaling beyond the first replica.
+    - type: Pods
+      pods:
+        metric:
+          name: prometheus.googleapis.com|vllm:kv_cache_usage_perc|gauge
+        target:
+          type: AverageValue
+          averageValue: "0.45"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        # Aggressive scale-up: bring pods online fast to drain the EPP queue.
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
