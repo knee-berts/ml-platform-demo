@@ -55,7 +55,15 @@ When no cluster is feasible, the dispatcher leaves `nominatedClusterNames` empty
 
 ### Thundering Herd Prevention
 
-An in-memory cache tracks dispatches that haven't been confirmed by Kueue yet (`status.clusterName` not set). When scoring, in-flight GPU reservations are subtracted from available capacity. This prevents two workloads submitted simultaneously from both being sent to the same cluster based on stale state. Entries expire after 60 seconds as a safety net.
+An in-memory cache tracks dispatches that haven't been confirmed by Kueue yet (`status.clusterName` not set). When scoring, in-flight GPU reservations are subtracted from available capacity. This prevents two workloads submitted simultaneously from both being sent to the same cluster based on stale state. Entries expire after a configurable TTL (default 60s) as a safety net.
+
+### Stale Nomination Recovery
+
+When the dispatcher nominates a workload to a cluster, MultiKueue dispatches it there. If the target cluster can't admit it (full, or conditions changed), `status.clusterName` is never set on the management workload. Without recovery, the workload stays pinned to that cluster forever.
+
+The dispatcher detects stale nominations by checking how long a nominated workload has been idle (no condition changes). After `nominationTimeout` (default 30s), it clears the nomination and requeues the workload for re-scoring. This allows the workload to be dispatched to a different cluster if capacity has shifted.
+
+To avoid an infinite nominate-clear-renominate cycle that keeps the in-flight cache perpetually full, the dispatcher requeues after clearing a stale nomination rather than immediately re-scoring. This gives the in-flight cache time to drain so the next scoring cycle sees accurate free GPU counts.
 
 ## Cluster Priority
 
@@ -180,20 +188,37 @@ nominating cluster  cluster=worker-west3-cluster
                     reason="only feasible cluster"
 ```
 
+Stale nomination recovery is also logged:
+
+```
+clearing stale nomination  nominated=worker-west3-cluster
+                           age=2m30s  sinceLastChange=1m15s
+```
+
+On startup, the dispatcher logs its full configuration:
+
+```
+starting least-disruption dispatcher  workers=2
+    resourceName=nvidia.com/gpu  flavorName=rtx-pro-6000
+    clusterQueue=gpu-cluster-queue  nominationTimeout=30s
+    inFlightTTL=1m0s  requeueDelay=5s  cleanupPeriod=30s
+```
+
 ## Project Structure
 
 ```
 dispatcher/
 ├── main.go                         # entry point, multi-cluster manager setup
 ├── pkg/
-│   ├── dispatcher/dispatcher.go    # workload reconciler
+│   ├── config/config.go            # ConfigMap + env var config loader
+│   ├── dispatcher/dispatcher.go    # workload reconciler (with stale nomination recovery)
 │   ├── scorer/scorer.go            # cluster scoring + selection
 │   ├── inflight/cache.go           # in-flight dispatch tracking
 │   └── cluster/client.go           # worker cluster discovery + auth
 ├── deploy/
-│   ├── deployment.yaml             # Deployment (with gcp-auth-plugin init container)
+│   ├── deployment.yaml             # Deployment (with gcp-auth-plugin init + config volume)
 │   ├── rbac.yaml                   # ServiceAccount + ClusterRole + Binding
-│   ├── config.yaml                 # ConfigMap with priority weights
+│   ├── config.yaml                 # ConfigMap with scoring weights + timing config
 │   └── kueue-config-patch.yaml     # Reference for patching Kueue config
 ├── Dockerfile
 ├── go.mod
@@ -202,7 +227,7 @@ dispatcher/
 
 ## Configuration
 
-Priority weights and resource settings are in the `least-disruption-dispatcher-config` ConfigMap:
+All configuration is in the `least-disruption-dispatcher-config` ConfigMap, mounted at `/config/config.yaml`. Changes take effect on pod restart.
 
 ```yaml
 priorityWeights:
@@ -212,7 +237,24 @@ priorityWeights:
 resourceName: "nvidia.com/gpu"
 flavorName: "rtx-pro-6000"
 clusterQueueName: "gpu-cluster-queue"
+nominationTimeoutSeconds: 30   # clear stale nominations after this long
+inFlightTTLSeconds: 60         # in-flight cache entries expire after this
+requeueDelaySeconds: 5         # delay between requeue attempts
+cleanupPeriodSeconds: 30       # how often to sweep expired in-flight entries
 ```
+
+### Environment Variable Overrides
+
+Timing parameters can be overridden per-pod via environment variables, which take precedence over ConfigMap values. This is useful for quick tuning without editing the ConfigMap:
+
+| Env Var | ConfigMap Field | Default |
+|---------|----------------|---------|
+| `DISPATCHER_NOMINATION_TIMEOUT_SECONDS` | `nominationTimeoutSeconds` | 30 |
+| `DISPATCHER_INFLIGHT_TTL_SECONDS` | `inFlightTTLSeconds` | 60 |
+| `DISPATCHER_REQUEUE_DELAY_SECONDS` | `requeueDelaySeconds` | 5 |
+| `DISPATCHER_CLEANUP_PERIOD_SECONDS` | `cleanupPeriodSeconds` | 30 |
+
+The config file path defaults to `/config/config.yaml` and can be changed with `DISPATCHER_CONFIG_PATH`.
 
 ## Reverting to AllAtOnce
 
