@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: least-disruption-dispatcher-config
+  namespace: kueue-system
+data:
+  config.yaml: |
+    priorityWeights:
+      training-low: 1
+      inference-high: 10
+      training-critical: 1000
+    resourceName: "nvidia.com/gpu"
+    flavorName: "rtx-pro-6000"
+    clusterQueueName: "gpu-cluster-queue"
+    nominationTimeoutSeconds: 30
+    inFlightTTLSeconds: 60
+    requeueDelaySeconds: 5
+    cleanupPeriodSeconds: 30

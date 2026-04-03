@@ -193,6 +193,7 @@ class KueueCollector(threading.Thread):
         self.state = kueue_state
         self._stop = threading.Event()
         self._prev_workloads: set = set()                # {(name, cluster)} for inference workloads
+        self._prev_training: set = set()                 # {(name, cluster)} for training workloads on workers
         self._prev_mgmt_training: Dict[str, dict] = {}   # mgmt workload name -> {evicted, requeued, admitted}
         self._training_cluster_map: Dict[str, str] = {}   # workload name -> cluster label (for preemption messages)
         self._pending_reschedules: set = set()             # workloads preempted but not yet placed on a worker
@@ -370,6 +371,36 @@ class KueueCollector(threading.Thread):
                     with open("/tmp/kueue_events_debug.log", "a") as dbg:
                         dbg.write(f"  >>> EVENT FIRED: {evt}\n")
 
+        # ── Training events on workers: detect experiments appearing/disappearing ──
+        new_train_keys = set()
+        for wl in new_workloads:
+            if wl.namespace == "training-jobs":
+                key = (wl.name, wl.cluster)
+                new_train_keys.add(key)
+                if key not in self._prev_training:
+                    cluster_label = wl.cluster.replace("us-", "")
+                    evt = f"DISPATCHED: {wl.name[:40]} → {cluster_label}"
+                    self.state.add_event(evt)
+                    with open("/tmp/kueue_events_debug.log", "a") as dbg:
+                        dbg.write(f"  >>> EVENT FIRED: {evt}\n")
+
+        # Detect training workloads that disappeared from workers (evicted or completed)
+        for prev_name, prev_cluster in self._prev_training:
+            if (prev_name, prev_cluster) not in new_train_keys:
+                cluster_label = prev_cluster.replace("us-", "")
+                # Check if an inference pod appeared on the same cluster — indicates preemption
+                new_inf_on_cluster = any(
+                    k not in self._prev_workloads and k[1] == prev_cluster
+                    for k in new_inf_keys
+                )
+                if new_inf_on_cluster:
+                    evt = f"EVICTED: {prev_name[:40]} on {cluster_label} (inference scaled)"
+                else:
+                    evt = f"COMPLETED: {prev_name[:40]} on {cluster_label}"
+                self.state.add_event(evt)
+                with open("/tmp/kueue_events_debug.log", "a") as dbg:
+                    dbg.write(f"  >>> EVENT FIRED: {evt}\n")
+
         # ── Training events: use mgmt as source of truth ──
         # Kueue sets Evicted=True briefly then flips to Evicted=False,Requeued=True
         # after rescheduling. The Evicted=True window is too short to catch reliably.
@@ -445,6 +476,7 @@ class KueueCollector(threading.Thread):
             (wl.name, wl.cluster) for wl in new_workloads
             if wl.namespace == "inference-server"
         }
+        self._prev_training = new_train_keys
 
     def run(self):
         # Truncate debug log at start of each run
@@ -454,6 +486,10 @@ class KueueCollector(threading.Thread):
         self._prev_workloads = {
             (wl.name, wl.cluster) for wl in initial
             if wl.namespace == "inference-server"
+        }
+        self._prev_training = {
+            (wl.name, wl.cluster) for wl in initial
+            if wl.namespace == "training-jobs"
         }
         # Seed mgmt training status but mark all as not-yet-requeued so we catch
         # preemptions that happened between load test start and first dashboard poll.
@@ -1112,7 +1148,8 @@ class Dashboard:
         mgmt_wl_out, mgmt_rc = kubectl(
             "get", "workloads", "-n", "training-jobs",
             "-o", "jsonpath={range .items[*]}{.metadata.name}|"
-            "{range .status.conditions[*]}{.type}={.status},{end}"
+            "{range .status.conditions[*]}{.type}={.status},{end}|"
+            "{.status.nominatedClusterNames}|{.status.clusterName}"
             "{\"\\n\"}{end}",
             context=MGMT_CONTEXT, timeout=10,
         )
@@ -1128,21 +1165,27 @@ class Dashboard:
                     if "=" in c:
                         k, v = c.split("=", 1)
                         conds[k] = v
+                # A workload is "dispatched" when it has been nominated to
+                # a worker cluster or has clusterName set — not just admitted
+                # on the mgmt queue.
+                nominated = len(parts) > 2 and parts[2].strip() not in ("", "[]")
+                cluster_set = len(parts) > 3 and parts[3].strip() != ""
+                dispatched = nominated or cluster_set
                 admitted = conds.get("Admitted") == "True"
                 evicted = conds.get("Evicted") == "True"
                 finished = conds.get("Finished") == "True"
                 if finished and not evicted:
                     continue
-                mgmt_jobs.append({"name": name, "admitted": admitted, "evicted": evicted})
+                mgmt_jobs.append({"name": name, "admitted": admitted, "evicted": evicted, "dispatched": dispatched})
         if mgmt_jobs:
-            n_admitted = sum(1 for j in mgmt_jobs if j["admitted"] and not j["evicted"])
-            n_pending = sum(1 for j in mgmt_jobs if not j["admitted"] and not j["evicted"])
+            n_dispatched = sum(1 for j in mgmt_jobs if j["dispatched"] and not j["evicted"])
+            n_queued = sum(1 for j in mgmt_jobs if not j["dispatched"] and not j["evicted"])
             n_evicted = sum(1 for j in mgmt_jobs if j["evicted"])
             depth_text.append("\n  MultiKueue depth  ", style="bold dim")
-            for j in sorted(mgmt_jobs, key=lambda j: (0 if j["admitted"] and not j["evicted"] else 1 if j["evicted"] else 2, j["name"])):
+            for j in sorted(mgmt_jobs, key=lambda j: (0 if j["dispatched"] and not j["evicted"] else 1 if j["evicted"] else 2, j["name"])):
                 if j["evicted"]:
                     depth_text.append("█", style="red")
-                elif j["admitted"]:
+                elif j["dispatched"]:
                     depth_text.append("█", style="green")
                 else:
                     depth_text.append("█", style="yellow")
