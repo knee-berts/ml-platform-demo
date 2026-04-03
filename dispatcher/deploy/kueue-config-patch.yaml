@@ -1,0 +1,21 @@
+# Reference: patch for kueue-manager-config ConfigMap on the mgmt cluster.
+#
+# Add dispatcherName under the multiKueue section:
+#
+#   multiKueue:
+#     dispatcherName: "least-disruption-dispatcher"
+#     clusterProfile:
+#       credentialsProviders:
+#       - execConfig:
+#           apiVersion: client.authentication.k8s.io/v1beta1
+#           command: /plugins/gcp-auth-plugin
+#           interactiveMode: Never
+#         name: google
+#
+# Apply with:
+#   kubectl get configmap kueue-manager-config -n kueue-system --context mgmt -o json \
+#     | python3 -c "..." \
+#     | kubectl apply --context mgmt -f -
+#
+# Then restart the Kueue controller:
+#   kubectl rollout restart deployment kueue-controller-manager -n kueue-system --context mgmt
