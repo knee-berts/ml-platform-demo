@@ -1,16 +1,18 @@
-# Multi-Cluster Inference Gateway + Kueue Preemption Demo
+# Multi-Cluster Inference Gateway + Flow Control + Kueue Preemption Demo
 
-Live demo of GKE's Multi-Cluster Inference Gateway with KV-cache-aware routing and Kueue-based GPU preemption, running on NVIDIA RTX PRO 6000 Blackwell GPUs.
+Live demo of GKE's Multi-Cluster Inference Gateway with KV-cache-aware routing, EPP flow control for request-level prioritization, and Kueue-based GPU preemption, running on NVIDIA RTX PRO 6000 Blackwell GPUs.
 
 ## What This Demo Shows
 
-Two GKE worker clusters (`us-east1`, `us-west3`) each run vLLM inference pods serving `meta-llama/Llama-3.1-8B-Instruct` with LoRA adapters. A management cluster ties them together with a cross-region gateway, MultiKueue federation, and an Endpoint Picker (EPP) for intelligent request routing.
+Two GKE worker clusters (`us-east1`, `us-west3`) each run vLLM inference pods serving `meta-llama/Llama-3.1-8B-Instruct` with LoRA adapters. A management cluster ties them together with a cross-region gateway, MultiKueue federation, and an Endpoint Picker (EPP v1.4.0) with flow control for intelligent, priority-aware request routing.
 
-The demo has two acts:
+The demo has three acts:
 
 1. **MultiKueue Training Distribution** — Submit training jobs to the management cluster. MultiKueue evaluates GPU capacity across both workers and dispatches each job to a cluster with room.
 
 2. **Inference Preemption Under Load** — Blast one cluster with inference traffic. Its KV cache fills up, the HPA scales out new inference pods, and Kueue preempts lower-priority training jobs to free GPUs. The evicted training job gets rescheduled by MultiKueue to the other cluster that still has capacity.
+
+3. **Flow Control & Request Prioritization** — Under heavy load, the EPP's saturation detector engages and holds requests in memory. Production requests (`food-review-prod`, priority 100) dispatch ahead of batch requests (`food-review-batch`, priority -10). Fair queuing ensures no single tenant monopolizes capacity within a priority band.
 
 ### Architecture
 
@@ -26,27 +28,44 @@ The demo has two acts:
                     ┌─────────────┴─────────────┐
                     ▼                           ▼
           ┌─────────────────┐           ┌─────────────────┐
-          │  us-east1       │           │  us-west4       │
+          │  us-east1       │           │  us-west3       │
           │  (8 GPU)        │           │  (8 GPU)        │
-          │  vLLM pods (4)  │           │  vLLM pods (4)  │
-          │  EPP            │           │  EPP            │
+          │  vLLM pods (2-6)│           │  vLLM pods (0-6)│
+          │  EPP v1.4.0     │           │  EPP v1.4.0     │
+          │  Flow Control   │           │  Flow Control   │
           │  InferencePool  │           │  InferencePool  │
           │  Kueue queues   │           │  Kueue queues   │
-          │  HPA            │           │  HPA            │
+          │  HPA            │           │  HPA (min=0)    │
           └─────────────────┘           └─────────────────┘
 ```
 
-### Routing (Two Tiers)
+### Routing (Three Tiers)
 
-- **Tier 1 — GCLB**: Picks which *cluster* gets the request based on geographic proximity and custom KV-cache metrics.
-- **Tier 2 — EPP**: Within the selected cluster, picks which *pod* gets the request based on KV-cache utilization, prefix cache affinity, and queue depth.
+- **Tier 1 — GCLB**: Picks which *cluster* gets the request based on geographic proximity and custom KV-cache metrics (60% threshold).
+- **Tier 2 — EPP Flow Control**: When the pool is saturated (avg queue depth > 100 or KV cache > 90%), the EPP queues requests in memory and dispatches by priority. Production requests (priority 100) go before batch requests (priority -10). Fairness is enforced per-tenant within each priority band.
+- **Tier 3 — EPP Scoring**: Picks which *pod* gets the request based on KV-cache utilization, prefix cache affinity, and queue depth.
+
+Clients control flow control behavior with two HTTP headers:
+- `x-gateway-inference-objective: food-review-prod` — selects the InferenceObjective (and thus priority)
+- `x-gateway-inference-fairness-id: tenant-abc` — identifies the tenant for fair queuing
 
 ### Priority Model
 
+**Workload scheduling (Kueue):**
+
 | Workload | Priority Class | Priority | Preemptible |
 |---|---|---|---|
-| Inference pods | `inference-high` | 1000 | No |
+| Critical training | `training-critical` | 2000 | No |
+| Inference pods | `inference-high` | 1000 | Only by critical training |
 | Training jobs | `training-low` | 100 | Yes |
+
+**Request scheduling (EPP flow control):**
+
+| InferenceObjective | Priority | Behavior under saturation |
+|---|---|---|
+| `food-review-prod` | 100 | Dispatched first |
+| *(no header)* | 0 | Default, dispatched after prod |
+| `food-review-batch` | -10 | Queued behind all others |
 
 When GPUs are needed for inference scale-out, Kueue evicts training jobs first.
 
@@ -110,10 +129,11 @@ Add `--auto` for an unattended version with timed pauses (good for recordings):
 python3 load_test.py --target-cluster west3 --concurrency 300
 ```
 
-This launches a load generator pod inside the target cluster and opens a live Rich dashboard showing:
+This launches load generator pods inside the target cluster and opens a live Rich dashboard showing:
 
 - **Cluster panels** — Per-pod KV cache utilization bars, running/waiting request counts, fill rate, sparkline history
 - **Routing panel** — Which cluster is the load target vs. spillover destination, threshold status
+- **EPP Flow Control panel** — Per-cluster EPP queue depth bars, saturation status, active InferenceObjective and fairness IDs
 - **Kueue panel** — HPA replica counts and scaling metrics, workload table with cluster/type/status, training pod counts, and a live event log showing preemptions and rescheduling
 - **Stats panel** — Load generator target, concurrency, success/error counts, RPS
 
@@ -151,9 +171,11 @@ Dashboard-only mode is useful when you want to show the live monitoring UI while
 |---|---|---|
 | `--mode` | `both` | `dashboard`, `load`, or `both` |
 | `--target-cluster` | `east1` | Which cluster to target (`east1` or `west3`). The other becomes the spillover destination. |
-| `--vip` | `10.142.0.74` | Load balancer VIP address |
+| `--vip` | auto-discovered | Load balancer VIP address |
 | `--concurrency` | `300` | Number of concurrent request workers |
 | `--max-tokens` | `2048` | Max tokens per completion (higher = longer in-flight = more KV blocks held) |
+| `--objective` | `food-review-prod` | InferenceObjective name sent via `x-gateway-inference-objective` header. Set to `food-review-batch` for low-priority load. |
+| `--load-pods` | `4` | Number of load generator pods to spread concurrency across |
 | `--direct-ip` | | Target a specific IP:port directly, bypassing the LB |
 
 ## Infrastructure Setup
@@ -180,9 +202,9 @@ Apply in order. Worker manifests go to both `worker-east1` and `worker-west3` co
 | `secret.yaml` | HuggingFace token for model downloads |
 | `gpu-deployment.yaml` | vLLM Deployment + LoRA syncer sidecar + ConfigMap + Service |
 | `inferencepool.yaml` | InferencePool (`vllm-llama3-8b-instruct`) with export annotation |
-| `endpointpicker.yaml` | EPP deployment for KV-cache-aware pod routing |
+| `endpointpicker.yaml` | EPP v1.4.0 deployment with flow control, saturation detector, and scoring plugins |
 | `autoscalingmetric.yaml` | Exports `kv-cache` metric from vLLM pods to GCP |
-| `inference-objective.yaml` | InferenceObjective linking to the pool |
+| `inference-objective.yaml` | Two InferenceObjectives: `food-review-prod` (priority 100) and `food-review-batch` (priority -10) |
 | `validatingadmissionpolicy.yaml` | Admission policy for the inference namespace |
 
 **Management** (`mgmt/`):
@@ -199,7 +221,7 @@ Apply in order. Worker manifests go to both `worker-east1` and `worker-west3` co
 
 | File | What it creates |
 |---|---|
-| `priority-classes.yaml` | `inference-high` (1000) and `training-low` (100) |
+| `priority-classes.yaml` | `inference-high` (1000), `training-low` (100), `training-critical` (2000) |
 | `resource-flavor.yaml` | `rtx-pro-6000` flavor |
 | `cluster-queue-worker.yaml` | `gpu-cluster-queue` with preemption policy (workers) |
 | `cluster-queue-mgmt.yaml` | ClusterQueue on management cluster |
@@ -208,7 +230,8 @@ Apply in order. Worker manifests go to both `worker-east1` and `worker-west3` co
 | `admission-check.yaml` | MultiKueue admission check |
 | `multikueue-config.yaml` | MultiKueue configuration |
 | `multikueue-cluster-*.yaml` | MultiKueueCluster references for each worker |
-| `hpa-inference.yaml` | HPA for vLLM deployment (scales on KV-cache utilization) |
+| `hpa-inference.yaml` | HPA for east1 vLLM deployment (scales on KV-cache utilization, min=2) |
+| `hpa-inference-west3.yaml` | HPA for west3 with scale-to-zero (min=0, scales on EPP flow control queue depth) |
 
 ### Building the vLLM Image
 

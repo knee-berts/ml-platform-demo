@@ -128,8 +128,8 @@ The EPP extracts the flow control headers:
    fairness_id: "tenant-abc"}`.
 
 3. **Saturation check**: The EPP's saturation detector evaluates pool health:
-   - Is any pod's local queue depth > 2? (`queueDepthThreshold: 2`)
-   - Is any pod's KV-cache utilization > 85%? (`kvCacheUtilThreshold: 0.85`)
+   - Is the average pod local queue depth > 100? (`queueDepthThreshold: 100`)
+   - Is the average KV-cache utilization > 90%? (`kvCacheUtilThreshold: 0.90`)
 
    If **not saturated** (our case at 45% KV): the request is dispatched
    immediately. The flow controller records the request in metrics
@@ -264,7 +264,7 @@ As request volume increases, the system responds at each layer:
 | **0-45%** | All traffic to east1. EPP dispatches immediately. HPA holds at min replicas. |
 | **45-60%** | HPA scales east1 pods (2 -> 4 -> 6). Kueue may preempt training jobs for GPU headroom. EPP still dispatching immediately. |
 | **60-85%** | GCLB begins shifting traffic to west3. EPP still dispatching immediately on both clusters. |
-| **>85%** | EPP saturation detector trips. Flow control engages: prod requests (priority 100) dispatch first; batch requests (priority -10) queue. TPOT is protected at the cost of increased TTFT. |
+| **>90%** | EPP saturation detector trips. Flow control engages: prod requests (priority 100) dispatch first; batch requests (priority -10) queue. TPOT is protected at the cost of increased TTFT. |
 
 If west3 is configured with scale-to-zero (`minReplicas: 0`), the first
 spillover request hits an EPP with no backends. The EPP holds the HTTP
