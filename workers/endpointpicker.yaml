@@ -45,12 +45,15 @@ data:
     - type: kv-cache-utilization-scorer
     - type: prefix-cache-scorer
     saturationDetector:
-      # Force most queuing into the EPP rather than model server local queues.
-      # Low value = tighter EPP control over dispatch ordering.
-      queueDepthThreshold: 2
-      # Pool considered saturated above 85% KV-cache — EPP holds requests
+      # Allow model servers to maintain a reasonable local queue before the EPP
+      # considers the pool saturated. Too low (e.g. 2) causes the EPP to halt
+      # all dispatching when a single pod is busy, even if other pods are idle.
+      # Set to ~10% of max batch size (--max-num-seq 1024) for a buffer that
+      # enables efficient batching without starving idle pods.
+      queueDepthThreshold: 100
+      # Pool considered saturated above 90% KV-cache — EPP holds requests
       # rather than flooding GPUs, protecting TPOT.
-      kvCacheUtilThreshold: 0.85
+      kvCacheUtilThreshold: 0.90
     flowControl:
       # 1GB HTTP payload buffer — bounds EPP memory, not GPU VRAM.
       maxBytes: 1000000000
