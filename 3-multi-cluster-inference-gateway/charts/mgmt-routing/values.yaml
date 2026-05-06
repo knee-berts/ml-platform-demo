@@ -1,0 +1,5 @@
+inferencePoolName: vllm-llama3-8b-instruct
+inferenceNamespace: inference-server
+gatewayName: cross-region-gateway
+gatewayNamespace: gateway-system
+kvCacheThresholdPct: 60

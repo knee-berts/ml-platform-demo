@@ -1,0 +1,20 @@
+project_id = "kubecon-fleets-demo-1"
+region     = "us-east1"
+
+# Versions track the upstream charts at registry.k8s.io.
+kueue_version           = "0.15.1"
+jobset_version          = "0.10.0"
+leaderworkerset_version = "0.7.0"
+
+# Build the derived Kueue image with `gcloud builds submit --config docker/cloudbuild.yaml`
+# before the first `terraform apply`. Leave both empty to use the stock chart
+# image — MultiKueue cross-cluster admission will not work in that mode.
+kueue_manager_image_repository = "us-east1-docker.pkg.dev/kubecon-fleets-demo-1/vllm-blackwell/kueue-with-gcp-auth"
+kueue_manager_image_tag        = "0.15.1"
+
+# Custom dispatcher image (built from /home/nickeberts/blackwell-vllm/dispatcher).
+dispatcher_image      = "us-east1-docker.pkg.dev/kubecon-fleets-demo-1/vllm-blackwell/least-disruption-dispatcher:latest"
+gcp_auth_plugin_image = "us-east1-docker.pkg.dev/kubecon-fleets-demo-1/gcp-auth-plugin/gcp-auth-plugin:v0.0.1"
+
+# Override if you want LWS off and only run training-jobset.yaml.
+# enable_leaderworkerset = false

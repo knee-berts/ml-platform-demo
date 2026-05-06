@@ -1,0 +1,5 @@
+apiVersion: v2
+name: inference-crds
+description: Inference-extension CRDs that are NOT auto-installed by GKE (currently just InferenceObjective). InferencePool ships with multi-cluster-ingress.
+version: 0.1.0
+type: application

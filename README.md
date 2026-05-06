@@ -184,23 +184,45 @@ The infrastructure spans three GKE clusters in project `kubecon-fleets-demo-1`.
 
 ### Infrastructure as Code (Terraform)
 
-GCP-side infra (project services, proxy subnets, cluster service accounts +
-IAM, fleet membership, multi-cluster ingress feature, the management +
-worker GKE clusters, the RTX PRO 6000 Blackwell node pool, and the
-`vllm-blackwell` Artifact Registry repo) lives in [`terraform/`](terraform/).
-In-cluster resources stay as YAML in `workers/`, `mgmt/`, and `kueue/` and
-are applied with `kubectl` after the clusters exist.
+The whole demo provisions in three layered Terraform stacks. Apply in order;
+each stack reads the previous via `terraform_remote_state` (default local
+backend — switch to GCS for shared state).
+
+| Stack | What it provisions |
+|---|---|
+| [`terraform/`](terraform/) | GCP infrastructure: project services, proxy subnets, cluster SAs + IAM, Workload Identity bindings, multi-cluster ingress feature, the management + worker GKE clusters with NAP, the Blackwell GPU pool, GCS buckets (model-weights, pod-snapshots), and Artifact Registry repos (`vllm-blackwell`, `gcp-auth-plugin`). |
+| [`2-multikueue/`](2-multikueue/) | In-cluster Kueue + MultiKueue control plane via the Helm provider: Kueue, JobSet, LeaderWorkerSet operators on every cluster; demo's WorkloadPriorityClasses, ResourceFlavor, ClusterQueue, LocalQueues; AdmissionCheck, MultiKueueConfig, MultiKueueClusters, ClusterProfiles on the hub; the `least-disruption-dispatcher` Deployment. |
+| [`3-multi-cluster-inference-gateway/`](3-multi-cluster-inference-gateway/) | In-cluster routing infrastructure via Helm: cross-region Gateway, HTTPRoute + GCPBackendPolicy + HealthCheckPolicy on the hub; per-worker InferencePool, InferenceObjectives, EPP, ComputeClass, AutoscalingMetric, HPA, and pod-snapshot config. |
 
 ```bash
+# 1. GCP-side infra
 cd terraform
-cp terraform.tfvars.example terraform.tfvars   # edit if needed
-terraform init
-terraform plan -out=tfplan
-terraform apply tfplan
+cp terraform.tfvars.example terraform.tfvars
+terraform init && terraform apply
+
+# 2. Kueue + MultiKueue (build the Kueue+gcp-auth-plugin image first — see 2-multikueue/README.md)
+cd ../2-multikueue
+cp terraform.tfvars.example terraform.tfvars
+terraform init && terraform apply
+
+# 3. Multi-cluster gateway + inference routing
+cd ../3-multi-cluster-inference-gateway
+cp terraform.tfvars.example terraform.tfvars
+terraform init && terraform apply
 ```
 
-See [`terraform/README.md`](terraform/README.md) for resource-by-resource
-detail, prerequisite quotas, and intentional omissions.
+After all three stacks apply, deploy the application data plane (vLLM
+Deployment + HF token Secret) with `kubectl`:
+
+```bash
+kubectl apply -f workers/secret.yaml --context worker-east1
+kubectl apply -f workers/gpu-deployment.yaml --context worker-east1
+# repeat for worker-west3
+```
+
+See each stack's `README.md` for resource-by-resource detail and
+prerequisites (quotas, build steps for the derived Kueue image and the
+dispatcher image, etc.).
 
 ### Clusters
 

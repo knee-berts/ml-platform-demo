@@ -1,0 +1,5 @@
+apiVersion: v2
+name: least-disruption-dispatcher
+description: Custom MultiKueue workload dispatcher that scores worker clusters by least-disruption (priority-weighted preemption cost) before nominating.
+version: 0.1.0
+type: application

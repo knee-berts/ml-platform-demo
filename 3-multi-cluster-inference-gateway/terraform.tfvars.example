@@ -1,0 +1,23 @@
+project_id = "kubecon-fleets-demo-1"
+region     = "us-east1"
+
+# Names below match what the demo's existing manifests use; change only if
+# you also change the application Deployment / load_test references.
+gateway_name        = "cross-region-gateway"
+inference_pool_name = "vllm-llama3-8b-instruct"
+inference_namespace = "inference-server"
+gateway_namespace   = "gateway-system"
+compute_class_name  = "inference-gpu"
+
+# EPP image and tunings.
+epp_image                          = "registry.k8s.io/gateway-api-inference-extension/epp:v1.4.0"
+saturation_kv_cache_util_threshold = 0.90
+saturation_queue_depth_threshold   = 100
+
+# Indexes (into the worker_clusters output of the 1-infrastructure stack)
+# that should get the scale-from-zero HPA profile. Default [1] gives the
+# second worker the spillover behavior described in kueue/hpa-inference-west3.yaml.
+scale_from_zero_worker_indexes = [1]
+
+# GCLB → cluster custom-metrics balancing threshold (percentage).
+kv_cache_threshold_percent = 60

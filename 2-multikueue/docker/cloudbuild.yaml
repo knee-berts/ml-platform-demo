@@ -1,0 +1,29 @@
+# Cloud Build config for the derived Kueue manager image with gcp-auth-plugin.
+#
+# Run (from this directory):
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_KUEUE_VERSION=v0.15.1,_AUTH_PLUGIN_IMAGE=...,_TARGET=...
+substitutions:
+  _KUEUE_VERSION: v0.15.1
+  _AUTH_PLUGIN_IMAGE: us-east1-docker.pkg.dev/${PROJECT_ID}/gcp-auth-plugin/gcp-auth-plugin:v0.0.1
+  _TARGET: us-east1-docker.pkg.dev/${PROJECT_ID}/vllm-blackwell/kueue-with-gcp-auth:0.15.1
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - KUEUE_VERSION=${_KUEUE_VERSION}
+      - --build-arg
+      - AUTH_PLUGIN_IMAGE=${_AUTH_PLUGIN_IMAGE}
+      - -t
+      - ${_TARGET}
+      - -f
+      - docker/Dockerfile
+      - .
+
+images:
+  - ${_TARGET}
+
+options:
+  logging: CLOUD_LOGGING_ONLY

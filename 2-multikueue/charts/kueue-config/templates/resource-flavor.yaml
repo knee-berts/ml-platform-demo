@@ -1,0 +1,7 @@
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: {{ .Values.flavorName }}
+spec:
+  nodeLabels:
+    {{- toYaml .Values.nodeLabels | nindent 4 }}

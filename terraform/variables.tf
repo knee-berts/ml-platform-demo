@@ -82,3 +82,9 @@ variable "nap_l4_max_count" {
   type        = number
   default     = 8
 }
+
+variable "model_weights_location" {
+  description = "Location for the model-weights bucket. US multi-region keeps a single copy globally accessible to both worker regions; switch to a single region (e.g. us-east1) if you want to colocate weights with one cluster."
+  type        = string
+  default     = "US"
+}

@@ -1,0 +1,18 @@
+# Set to true on the management cluster — gives the cluster queue a 16-GPU
+# nominal quota and wires up the multikueue-check admission check (which the
+# multikueue-control-plane chart provides).
+isManager: false
+
+# Per-cluster GPU quota.
+nominalGpuQuota: 8
+
+# ResourceFlavor name + node labels used to select the GPU pool.
+flavorName: rtx-pro-6000
+nodeLabels:
+  cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+
+# Namespace that hosts the inference Deployment + LocalQueue.
+inferenceServerNamespace: inference-server
+
+# Namespace that hosts training jobs (created by this chart) + LocalQueue.
+trainingNamespace: training-jobs

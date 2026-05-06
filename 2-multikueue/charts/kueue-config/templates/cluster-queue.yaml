@@ -1,0 +1,20 @@
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: gpu-cluster-queue
+spec:
+  namespaceSelector: {}
+  preemption:
+    withinClusterQueue: LowerPriority
+    reclaimWithinCohort: Any
+  {{- if .Values.isManager }}
+  admissionChecks:
+    - multikueue-check
+  {{- end }}
+  resourceGroups:
+    - coveredResources: ["nvidia.com/gpu"]
+      flavors:
+        - name: {{ .Values.flavorName }}
+          resources:
+            - name: "nvidia.com/gpu"
+              nominalQuota: {{ .Values.nominalGpuQuota }}

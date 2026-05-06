@@ -1,0 +1,16 @@
+image: us-east1-docker.pkg.dev/kubecon-fleets-demo-1/vllm-blackwell/least-disruption-dispatcher:latest
+gcpAuthPluginImage: us-east1-docker.pkg.dev/kubecon-fleets-demo-1/gcp-auth-plugin/gcp-auth-plugin:v0.0.1
+
+# Resource flavor + cluster queue the dispatcher reasons about.
+flavorName: rtx-pro-6000
+clusterQueueName: gpu-cluster-queue
+
+# Tuning knobs forwarded into the dispatcher ConfigMap.
+priorityWeights:
+  training-low: 1
+  inference-high: 10
+  training-critical: 1000
+nominationTimeoutSeconds: 30
+inFlightTTLSeconds: 60
+requeueDelaySeconds: 5
+cleanupPeriodSeconds: 30

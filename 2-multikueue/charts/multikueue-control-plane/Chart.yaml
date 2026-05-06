@@ -1,0 +1,5 @@
+apiVersion: v2
+name: multikueue-control-plane
+description: MultiKueue admission check, configuration, MultiKueueClusters, and standalone ClusterProfiles. Applied only to the management cluster.
+version: 0.1.0
+type: application

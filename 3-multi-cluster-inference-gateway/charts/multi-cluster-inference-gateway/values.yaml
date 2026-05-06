@@ -1,0 +1,14 @@
+gateway:
+  name: cross-region-gateway
+  gatewayClassName: gke-l7-cross-regional-internal-managed-mc
+  addresses: []
+  # Each cluster region the gateway needs to serve from gets one entry:
+  # - type: networking.gke.io/ephemeral-ipv4-address/us-east1
+  #   value: "us-east1"
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
