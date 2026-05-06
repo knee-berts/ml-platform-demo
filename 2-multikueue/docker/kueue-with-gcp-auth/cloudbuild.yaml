@@ -1,8 +1,12 @@
 # Cloud Build config for the derived Kueue manager image with gcp-auth-plugin.
 #
-# Run (from this directory):
-#   gcloud builds submit --config cloudbuild.yaml \
-#     --substitutions=_KUEUE_VERSION=v0.15.1,_AUTH_PLUGIN_IMAGE=...,_TARGET=...
+# Run from the 2-multikueue directory:
+#   gcloud builds submit . --config docker/kueue-with-gcp-auth/cloudbuild.yaml \
+#     --substitutions=_KUEUE_VERSION=v0.15.1
+#
+# The submitted source tarball just needs to include this Dockerfile — the
+# build pulls the actual layers from the upstream Kueue and gcp-auth-plugin
+# images on each FROM, so the build context can stay tiny.
 substitutions:
   _KUEUE_VERSION: v0.15.1
   _AUTH_PLUGIN_IMAGE: us-east1-docker.pkg.dev/${PROJECT_ID}/gcp-auth-plugin/gcp-auth-plugin:v0.0.1
@@ -19,7 +23,7 @@ steps:
       - -t
       - ${_TARGET}
       - -f
-      - docker/Dockerfile
+      - docker/kueue-with-gcp-auth/Dockerfile
       - .
 
 images:

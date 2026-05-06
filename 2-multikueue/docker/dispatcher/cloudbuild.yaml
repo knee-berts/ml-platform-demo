@@ -1,0 +1,31 @@
+# Cloud Build config for the least-disruption-dispatcher image.
+#
+# Source: /home/nickeberts/blackwell-vllm/dispatcher (Go project with its own
+# Dockerfile). The dispatcher is the workload that runs alongside Kueue on the
+# management cluster (helm release "least-disruption-dispatcher" in 2-multikueue/main.tf).
+#
+# Run from the repo root (so the dispatcher/ source is the build context):
+#   gcloud builds submit dispatcher \
+#     --config 2-multikueue/docker/dispatcher/cloudbuild.yaml
+#
+# Then point terraform.tfvars at the resulting image:
+#   dispatcher_image = "us-east1-docker.pkg.dev/<project>/vllm-blackwell/least-disruption-dispatcher:<tag>"
+substitutions:
+  _TAG: latest
+  _TARGET: us-east1-docker.pkg.dev/${PROJECT_ID}/vllm-blackwell/least-disruption-dispatcher
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_TARGET}:${_TAG}
+      - -f
+      - Dockerfile
+      - .
+
+images:
+  - ${_TARGET}:${_TAG}
+
+options:
+  logging: CLOUD_LOGGING_ONLY

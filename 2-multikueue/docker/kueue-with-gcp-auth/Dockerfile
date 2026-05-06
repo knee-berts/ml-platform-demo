@@ -8,8 +8,8 @@
 #     --build-arg AUTH_PLUGIN_IMAGE=us-east1-docker.pkg.dev/<project>/gcp-auth-plugin/gcp-auth-plugin:v0.0.1 \
 #     -t us-east1-docker.pkg.dev/<project>/vllm-blackwell/kueue-with-gcp-auth:0.15.1 .
 #
-# Or via Cloud Build:
-#   gcloud builds submit --config docker/cloudbuild.yaml \
+# Or via Cloud Build (run from 2-multikueue/):
+#   gcloud builds submit . --config docker/kueue-with-gcp-auth/cloudbuild.yaml \
 #     --substitutions=_KUEUE_VERSION=v0.15.1
 #
 # Then point terraform.tfvars at the resulting image:

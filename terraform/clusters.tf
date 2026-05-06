@@ -1,5 +1,12 @@
 # Management cluster (Autopilot) — hosts the multi-cluster Gateway, HTTPRoute,
 # Kueue/MultiKueue control plane, and ArgoCD if used. No GPUs here.
+#
+# The `fleet { project = ... }` block auto-registers the cluster as a member
+# of the project's Fleet (created explicitly by google_gke_hub_fleet.default
+# in fleet.tf). The two `fleet-clusterinventory-*` resource_labels designate
+# this cluster as the inventory manager — fleet-clusterinventory then
+# auto-creates ClusterProfile resources in the kueue-system namespace for
+# every fleet member, which MultiKueueCluster references via clusterProfileRef.
 resource "google_container_cluster" "management" {
   name             = var.management_cluster_name
   project          = var.project_id
@@ -53,11 +60,16 @@ resource "google_container_cluster" "management" {
     google_project_service.default,
     google_project_iam_member.clusters,
     google_compute_subnetwork.proxy_subnet,
+    google_gke_hub_fleet.default,
   ]
 }
 
 # Worker clusters (Standard) — hold the GPU node pool, vLLM Deployments, EPP,
-# and InferencePool/InferenceObjective resources.
+# and InferencePool/InferenceObjective resources. The `fleet { project = ... }`
+# block auto-registers each worker as a fleet member; fleet-clusterinventory
+# then creates a ClusterProfile for it in the management cluster's
+# kueue-system namespace, which MultiKueueCluster.spec.clusterSource.clusterProfileRef
+# (configured by the 2-multikueue stack) targets.
 resource "google_container_cluster" "workers" {
   for_each = toset(var.worker_regions)
 
@@ -154,6 +166,7 @@ resource "google_container_cluster" "workers" {
     google_project_service.default,
     google_project_iam_member.clusters,
     google_compute_subnetwork.proxy_subnet,
+    google_gke_hub_fleet.default,
   ]
 
   # The demo scripts patch ClusterQueue quotas and other in-cluster state at

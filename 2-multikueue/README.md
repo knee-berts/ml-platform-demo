@@ -43,10 +43,36 @@ The Kueue manager then references `/plugins/gcp-auth-plugin` via
 `multiKueue.clusterProfile.credentialsProviders` in the controller config.
 No init container, no kustomize, no shell-out.
 
-`docker/Dockerfile` and `docker/cloudbuild.yaml` build this image. Build it
-once and point `kueue_manager_image_repository` / `kueue_manager_image_tag`
-at the result. If you leave those empty Kueue installs but MultiKueue
-cross-cluster admission won't work.
+`docker/kueue-with-gcp-auth/{Dockerfile,cloudbuild.yaml}` build this image.
+Build it once and point `kueue_manager_image_repository` /
+`kueue_manager_image_tag` at the result. If you leave those empty Kueue
+installs but MultiKueue cross-cluster admission won't work.
+
+## Image build steps (run before `terraform apply`)
+
+The dispatcher and the derived Kueue image are both built out of band — no
+Terraform shell-out — and pushed to the `vllm-blackwell` Artifact Registry
+repo provisioned by the 1-infrastructure stack.
+
+```bash
+# From the 2-multikueue/ directory.
+
+# 1. Derived Kueue manager image (only needs to be rebuilt when Kueue
+#    bumps versions or the auth plugin binary changes).
+gcloud builds submit . \
+  --config docker/kueue-with-gcp-auth/cloudbuild.yaml \
+  --substitutions=_KUEUE_VERSION=v0.15.1
+
+# 2. least-disruption-dispatcher image (built from the Go source in
+#    ../dispatcher/, which has its own Dockerfile).
+gcloud builds submit ../dispatcher \
+  --config docker/dispatcher/cloudbuild.yaml \
+  --substitutions=_TAG=latest
+```
+
+The terraform.tfvars.example sets `dispatcher_image` and
+`kueue_manager_image_repository` / `kueue_manager_image_tag` to the targets
+those Cloud Build configs produce by default.
 
 ## Prerequisites
 
@@ -58,18 +84,9 @@ cross-cluster admission won't work.
    The 1-infrastructure stack creates the AR repo; you build/push the binary
    image yourself (one-time, out of band — it doesn't change between Kueue
    versions).
-3. You've built the derived Kueue image:
-
-   ```bash
-   gcloud builds submit \
-     --config docker/cloudbuild.yaml \
-     --substitutions=_KUEUE_VERSION=v0.15.1
-   ```
-
-4. You've built the dispatcher image from `../dispatcher/Dockerfile` (also
-   one-time, out of band).
-
-5. `gcloud auth application-default login` (or a service-account key) so
+3. You've run both Cloud Builds above so `kueue-with-gcp-auth` and
+   `least-disruption-dispatcher` images exist in Artifact Registry.
+4. `gcloud auth application-default login` (or a service-account key) so
    Terraform's google + helm providers can reach the API servers.
 
 ## Usage
