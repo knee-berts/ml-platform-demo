@@ -93,8 +93,41 @@ resource "google_container_cluster" "workers" {
     }
   }
 
+  # Node Auto-Provisioning. The inference-gpu ComputeClass uses NAP to
+  # materialize L4 Spot / L4 on-demand pools when Blackwell stocks out.
+  # The Blackwell pool itself stays Terraform-managed (see below).
   cluster_autoscaling {
+    enabled             = true
     autoscaling_profile = "OPTIMIZE_UTILIZATION"
+
+    resource_limits {
+      resource_type = "cpu"
+      minimum       = 0
+      maximum       = var.nap_cpu_max
+    }
+    resource_limits {
+      resource_type = "memory"
+      minimum       = 0
+      maximum       = var.nap_memory_max_gb
+    }
+    resource_limits {
+      resource_type = "nvidia-l4"
+      minimum       = 0
+      maximum       = var.nap_l4_max_count
+    }
+
+    auto_provisioning_defaults {
+      service_account = google_service_account.clusters["worker"].email
+      oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+      image_type      = "COS_CONTAINERD"
+      disk_size       = var.gpu_node_disk_size_gb
+      disk_type       = "pd-balanced"
+
+      management {
+        auto_repair  = true
+        auto_upgrade = true
+      }
+    }
   }
 
   monitoring_config {

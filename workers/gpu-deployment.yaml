@@ -19,12 +19,22 @@ spec:
         kueue.x-k8s.io/priority-class: inference-high
     spec:
       runtimeClassName: gvisor
+      # Schedule via the inference-gpu ComputeClass (workers/computeclass.yaml).
+      # Priority order: Blackwell on-demand → L4 Spot → L4 on-demand. The single
+      # vllm-blackwell image is multi-arch (sm_75–sm_120) and runs on both Ada
+      # Lovelace (L4, sm_89) and Blackwell (sm_120) without modification.
       nodeSelector:
-        cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+        cloud.google.com/compute-class: inference-gpu
 
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
+          effect: NoSchedule
+        # Required so the L4 Spot priority is reachable — Spot nodes are tainted
+        # cloud.google.com/gke-spot=true:NoSchedule by GKE.
+        - key: cloud.google.com/gke-spot
+          operator: Equal
+          value: "true"
           effect: NoSchedule
 
       # Prevents a 'vllm' Service in the namespace from injecting VLLM_PORT

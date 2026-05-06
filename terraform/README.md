@@ -14,8 +14,9 @@ Kueue, MultiKueue, ArgoCD, etc.) stay as the YAML in `../workers/`,
 | Cluster service accounts | `sa-management` + `sa-worker`, each with the standard GKE node roles plus `artifactregistry.reader`, `monitoring.viewer`, `autoscaling.metricsWriter`. |
 | Workload Identity bindings | `gke-mcs/gke-mcs-importer`, `custom-metrics/custom-metrics-stackdriver-adapter`, `kueue-system/kueue-controller-manager`. |
 | Management cluster | Autopilot, RAPID channel, fleet-registered, Gateway API enabled, Managed Prometheus. |
-| Worker clusters | One Standard cluster per `worker_regions` entry, fleet-registered, Gateway API enabled, Managed Prometheus. |
+| Worker clusters | One Standard cluster per `worker_regions` entry, fleet-registered, Gateway API enabled, Managed Prometheus, Node Auto-Provisioning enabled with `nvidia-l4` / cpu / memory limits. |
 | GPU node pool | One per worker cluster: `g4-standard-48` (1× RTX PRO 6000 Blackwell), autoscaling 0–8 nodes, GKE-default driver, COS, GPU taint. |
+| L4 fallback | **No Terraform-managed L4 pool.** NAP creates `g2-standard-12` Spot / on-demand pools on demand, driven by the `inference-gpu` ComputeClass in `workers/computeclass.yaml`. Per-cluster ceiling: `nap_l4_max_count` (default 8). |
 | Multi-Cluster Ingress | Fleet feature with the management cluster as config membership. |
 | Artifact Registry | `vllm-blackwell` Docker repo in the management region for the custom Blackwell-optimized vLLM image. |
 

@@ -210,6 +210,25 @@ detail, prerequisite quotas, and intentional omissions.
 | ai-worker-us-east1 | Worker: inference + training | us-east1 | `worker-east1` |
 | ai-worker-us-west3 | Worker: inference + training | us-west3 | `worker-west3` |
 
+### GPU fallback (Custom Compute Class)
+
+Blackwell (RTX PRO 6000) is hard to obtain. The `inference-gpu` ComputeClass
+in [`workers/computeclass.yaml`](workers/computeclass.yaml) provides an
+ordered fallback for the inference Deployment:
+
+1. **Blackwell on-demand** — matches the Terraform-managed `g4-standard-48` pool by config.
+2. **L4 Spot** — Node Auto-Provisioning materializes a `g2-standard-12` Spot pool when Blackwell is unavailable.
+3. **L4 on-demand** — final fallback when L4 Spot capacity is also unavailable.
+
+`activeMigration` repacks pods back to higher-priority options when capacity
+returns. NAP is enabled on each worker cluster via `cluster_autoscaling.enabled`
+in Terraform with `nvidia-l4` resource limits, so the L4 pools are created
+automatically — no extra Terraform pool is required.
+
+The single `vllm-blackwell` image is multi-arch (sm_75–sm_120) and runs on
+both Ada Lovelace (L4, sm_89) and Blackwell without changes; no separate
+image is needed for the fallback path.
+
 ### Manifests
 
 Apply in order. Worker manifests go to both `worker-east1` and `worker-west3` contexts.
@@ -220,6 +239,7 @@ Apply in order. Worker manifests go to both `worker-east1` and `worker-west3` co
 |---|---|
 | `namespace.yaml` | `inference-server` namespace |
 | `secret.yaml` | HuggingFace token for model downloads |
+| `computeclass.yaml` | `inference-gpu` ComputeClass: Blackwell on-demand → L4 Spot → L4 on-demand fallback (NAP-driven) |
 | `gpu-deployment.yaml` | vLLM Deployment + LoRA syncer sidecar + ConfigMap + Service |
 | `inferencepool.yaml` | InferencePool (`vllm-llama3-8b-instruct`) with export annotation |
 | `endpointpicker.yaml` | EPP v1.4.0 deployment with flow control, saturation detector, and scoring plugins |

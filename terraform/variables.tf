@@ -62,3 +62,23 @@ variable "release_channel" {
   type        = string
   default     = "RAPID"
 }
+
+# Node Auto-Provisioning (NAP) limits for the worker clusters. NAP backs the
+# L4 Spot / L4 on-demand priorities of the inference-gpu ComputeClass.
+variable "nap_cpu_max" {
+  description = "Per-cluster ceiling on CPU cores NAP can provision. Sized for the L4 fallback path: g2-standard-12 = 12 vCPU, room for ~8 nodes."
+  type        = number
+  default     = 128
+}
+
+variable "nap_memory_max_gb" {
+  description = "Per-cluster ceiling on memory (GiB) NAP can provision."
+  type        = number
+  default     = 512
+}
+
+variable "nap_l4_max_count" {
+  description = "Per-cluster ceiling on the number of nvidia-l4 GPUs NAP can provision. Caps the L4 fallback path."
+  type        = number
+  default     = 8
+}
