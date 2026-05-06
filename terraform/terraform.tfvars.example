@@ -1,0 +1,16 @@
+project_id = "kubecon-fleets-demo-1"
+
+# Management cluster region. Also the location of the Artifact Registry repo
+# and the multi-cluster ingress config membership.
+region = "us-east1"
+
+# Worker clusters. Each region gets ai-worker-<region> with a Blackwell GPU pool.
+worker_regions = ["us-east1", "us-west3"]
+
+# Optional overrides — defaults match the demo as documented in CLAUDE.md.
+# gpu_machine_type      = "g4-standard-48"
+# gpu_count_per_node    = 1
+# gpu_node_min_count    = 0
+# gpu_node_max_count    = 8
+# gpu_node_disk_size_gb = 200
+# release_channel       = "RAPID"

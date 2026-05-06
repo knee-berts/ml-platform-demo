@@ -182,6 +182,26 @@ Dashboard-only mode is useful when you want to show the live monitoring UI while
 
 The infrastructure spans three GKE clusters in project `kubecon-fleets-demo-1`.
 
+### Infrastructure as Code (Terraform)
+
+GCP-side infra (project services, proxy subnets, cluster service accounts +
+IAM, fleet membership, multi-cluster ingress feature, the management +
+worker GKE clusters, the RTX PRO 6000 Blackwell node pool, and the
+`vllm-blackwell` Artifact Registry repo) lives in [`terraform/`](terraform/).
+In-cluster resources stay as YAML in `workers/`, `mgmt/`, and `kueue/` and
+are applied with `kubectl` after the clusters exist.
+
+```bash
+cd terraform
+cp terraform.tfvars.example terraform.tfvars   # edit if needed
+terraform init
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+See [`terraform/README.md`](terraform/README.md) for resource-by-resource
+detail, prerequisite quotas, and intentional omissions.
+
 ### Clusters
 
 | Cluster | Role | Region | kubectl context |
