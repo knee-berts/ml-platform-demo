@@ -55,6 +55,59 @@ narrate() {
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 LOAD_TEST_PID=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WORKER_CTXS=(worker-east1 worker-west3)
+
+# Manifests applied/torn down by the inference stack helpers below.
+# Order matters for create (deps first); delete walks the reverse order.
+INFERENCE_STACK_MANIFESTS=(
+  "workers/namespace.yaml"
+  "workers/secret.yaml"
+  "workers/gpu-deployment.yaml"
+  "workers/inferencepool.yaml"
+  "workers/endpointpicker.yaml"
+  "workers/inference-objective.yaml"
+  "kueue/hpa-inference.yaml"
+)
+
+create_inference_stack() {
+  echo -e "  ${DIM}Applying inference stack (vLLM + EPP) to ${WORKER_CTXS[*]}...${NC}"
+  for ctx in "${WORKER_CTXS[@]}"; do
+    for f in "${INFERENCE_STACK_MANIFESTS[@]}"; do
+      kubectl apply -f "$SCRIPT_DIR/$f" --context "$ctx" >/dev/null 2>&1 || \
+        echo -e "  ${YELLOW}warn:${NC} apply $f on $ctx failed"
+    done
+  done
+  echo -e "  ${DIM}Waiting for vLLM deployment to be Available (model load can take ~10 min)...${NC}"
+  for ctx in "${WORKER_CTXS[@]}"; do
+    kubectl wait deployment/vllm-llama3-8b-instruct \
+      -n inference-server --context "$ctx" \
+      --for=condition=Available --timeout=15m >/dev/null 2>&1 &
+  done
+  wait
+  for ctx in "${WORKER_CTXS[@]}"; do
+    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+    if kubectl get deployment/vllm-llama3-8b-instruct -n inference-server --context "$ctx" \
+        -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null | grep -q True; then
+      echo -e "  ${GREEN}✓${NC} vLLM ready on ${BOLD}$label${NC}"
+    else
+      echo -e "  ${YELLOW}!${NC} vLLM not yet Available on ${BOLD}$label${NC} — continuing anyway"
+    fi
+  done
+}
+
+delete_inference_stack() {
+  # Only release GPU-holding objects: the HPA (so it can't fight the scale-down)
+  # and the vLLM Deployment. Everything else (namespace, secret, EPP, InferencePool,
+  # InferenceObjective, ConfigMap, Service) stays — none of it holds GPUs, and keeping
+  # it avoids the namespace-Terminating race on quick re-runs. Next create_inference_stack
+  # re-applies the manifests idempotently.
+  echo -e "  ${DIM}Releasing GPU capacity (HPA + vLLM Deployment) on ${WORKER_CTXS[*]}...${NC}"
+  for ctx in "${WORKER_CTXS[@]}"; do
+    kubectl delete hpa vllm-inference-hpa -n inference-server --context "$ctx" --ignore-not-found=true --wait=false >/dev/null 2>&1 &
+    kubectl delete deployment vllm-llama3-8b-instruct -n inference-server --context "$ctx" --ignore-not-found=true --wait=false >/dev/null 2>&1 &
+  done
+  wait
+}
 
 cleanup_bad_pods() {
   # Force-delete pods stuck in Terminating or CrashLoopBackOff (0/2 Ready)
@@ -107,12 +160,8 @@ do_cleanup() {
   wait
   # Clean up bad pods
   cleanup_bad_pods
-  # Reset HPAs back to min=2, max=6 and scale deployments to 2 replicas
-  echo -e "  ${DIM}Resetting HPAs to min=2, max=6...${NC}"
-  kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-east1 2>/dev/null || true
-  kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-west3 2>/dev/null || true
-  kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-east1 2>/dev/null || true
-  kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-west3 2>/dev/null || true
+  # Tear down the inference stack (vLLM + EPP) on both worker clusters.
+  delete_inference_stack
   echo -e "${GREEN}Cleanup complete.${NC}"
 }
 
@@ -268,11 +317,8 @@ kubectl delete jobset "pre-training-2" -n training-jobs --context mgmt --ignore-
 wait
 # Clean up bad inference pods
 cleanup_bad_pods
-# Reset HPAs and scale
-kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-east1 2>/dev/null || true
-kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-west3 2>/dev/null || true
-kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-east1 2>/dev/null || true
-kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-west3 2>/dev/null || true
+# Bring up the inference stack (vLLM + EPP) on each worker cluster.
+create_inference_stack
 echo -e "${GREEN}Pre-flight complete.${NC}"
 echo ""
 
