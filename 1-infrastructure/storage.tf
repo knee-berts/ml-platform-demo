@@ -1,10 +1,12 @@
 # GCS buckets the demo workloads read/write at runtime.
 #
 # - model-weights: vLLM pulls Llama-3.1-8B-Instruct + LoRA adapters from here
-#   via runai_streamer (workers/gpu-deployment.yaml).
+#   via runai_streamer (Deployment installed by the inference-application helm
+#   chart in 3-multi-cluster-inference-gateway/).
 # - pod-snapshots-<region>: GKE Pod Snapshot writes vLLM checkpoints here
-#   (workers/pod-snapshot.yaml). One per worker region so the snapshot is
-#   colocated with the cluster reading it.
+#   (configured by the inference-routing helm chart's pod-snapshot template).
+#   One per worker region so the snapshot is colocated with the cluster
+#   reading it.
 
 resource "google_storage_bucket" "model_weights" {
   name                        = "${var.project_id}-model-weights"
