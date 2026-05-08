@@ -1,5 +1,5 @@
 variable "project_id" {
-  description = "GCP project ID hosting the demo. Must match the value used by the 1-infrastructure stack (terraform/)."
+  description = "GCP project ID hosting the demo. Must match the value used by the 1-infrastructure stack (1-infrastructure/)."
   type        = string
 }
 
@@ -52,7 +52,7 @@ variable "dispatcher_image" {
 }
 
 variable "enable_dispatcher" {
-  description = "Whether to install the least-disruption-dispatcher Deployment. Default true. The dispatcher reads worker connection details from the kubernetes_secret.worker_kubeconfig resources in this stack and authenticates via Workload Identity (terraform/iam.tf::least_disruption_dispatcher), so all prereqs are wired automatically. Set false to fall back to Kueue's built-in AllAtOnce dispatcher."
+  description = "Whether to install the least-disruption-dispatcher Deployment. Default true. The dispatcher reads worker connection details from the kubernetes_secret.worker_kubeconfig resources in this stack and authenticates via Workload Identity (1-infrastructure/iam.tf::least_disruption_dispatcher), so all prereqs are wired automatically. Set false to fall back to Kueue's built-in AllAtOnce dispatcher."
   type        = bool
   default     = true
 }
@@ -86,7 +86,7 @@ variable "gpu_node_label" {
 }
 
 variable "infra_state_path" {
-  description = "Local path to the 1-infrastructure (terraform/) state file. Override if you keep state somewhere else."
+  description = "Local path to the 1-infrastructure state file. Override if you keep state somewhere else."
   type        = string
-  default     = "../terraform/terraform.tfstate"
+  default     = "../1-infrastructure/terraform.tfstate"
 }

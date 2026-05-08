@@ -39,7 +39,7 @@ Kueue, MultiKueue, ArgoCD, etc.) stay as the YAML in `../workers/`,
 ## Usage
 
 ```bash
-cd terraform
+cd 1-infrastructure
 cp terraform.tfvars.example terraform.tfvars
 # edit terraform.tfvars if you want non-default project/regions/sizing
 
@@ -60,7 +60,7 @@ $(terraform output -raw get_credentials_commands | jq -r '.[]')
 ## Layout
 
 ```
-terraform/
+1-infrastructure/
 ├── versions.tf              providers + version constraints
 ├── variables.tf             inputs (defaults match the demo)
 ├── apis.tf                  google_project_service for required APIs

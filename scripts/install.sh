@@ -11,7 +11,7 @@
 #
 # Optional env:
 #   REGION                Default us-east1 (mgmt cluster + AR + most workloads).
-#   WORKER_REGIONS        Default "us-east1 us-west3" (space-separated).
+#   WORKER_REGIONS        Default "us-east1 us-central1" (space-separated).
 #   GOOGLE_APPLICATION_CREDENTIALS  Path to a SA key file. Required when running
 #                                   the SA from a project different than PROJECT_ID.
 #   SKIP_DEMO             Set to 1 to NOT auto-run demo-preemption.sh after install.
@@ -36,14 +36,14 @@
 #
 # What this does:
 #   1. Verifies prereqs and enables required APIs.
-#   2. terraform apply ./terraform   (1-infrastructure)
+#   2. terraform apply ./1-infrastructure   (1-infrastructure)
 #   3. Builds 4 images via Cloud Build (gcp-auth-plugin, kueue-with-gcp-auth,
 #      dispatcher, vllm), in parallel where deps allow.
 #   4. Uploads Llama 3.1 8B weights to gs://<project>-model-weights via Cloud Build
 #      (uses HF_TOKEN out of Secret Manager).
 #   5. terraform apply ./2-multikueue
 #   6. terraform apply ./3-multi-cluster-inference-gateway (TF_VAR_hf_token=$HF_TOKEN)
-#   7. Renames kubectl contexts to mgmt / worker-east1 / worker-west3.
+#   7. Renames kubectl contexts to mgmt / worker-east1 / worker-central1.
 #   8. Optionally runs demo-preemption.sh.
 #
 # Total wall-clock: ~30-45 min (cluster creation + vLLM image push + weights download).
@@ -69,7 +69,7 @@ SKIP_WEIGHTS_UPLOAD="${SKIP_WEIGHTS_UPLOAD:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TF_INFRA="$ROOT_DIR/terraform"
+TF_INFRA="$ROOT_DIR/1-infrastructure"
 TF_KUEUE="$ROOT_DIR/2-multikueue"
 TF_MCIG="$ROOT_DIR/3-multi-cluster-inference-gateway"
 
@@ -164,7 +164,7 @@ step "1-infrastructure (clusters, fleet, AR, buckets)"
 (cd "$TF_INFRA" && $TERRAFORM init -input=false -upgrade) >/dev/null
 (cd "$TF_INFRA" && $TERRAFORM apply -input=false -auto-approve)
 
-ok "terraform/ applied"
+ok "1-infrastructure/ applied"
 
 # Capture cluster connection details for kubectl context renaming below.
 mapfile -t WORKER_CLUSTER_NAMES < <(cd "$TF_INFRA" && $TERRAFORM output -json worker_cluster_names | jq -r '.[]')

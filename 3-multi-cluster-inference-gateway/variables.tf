@@ -1,5 +1,5 @@
 variable "project_id" {
-  description = "GCP project ID hosting the demo. Must match the value used by the 1-infrastructure stack (terraform/)."
+  description = "GCP project ID hosting the demo. Must match the value used by the 1-infrastructure stack (1-infrastructure/)."
   type        = string
 }
 
@@ -10,9 +10,9 @@ variable "region" {
 }
 
 variable "infra_state_path" {
-  description = "Local path to the 1-infrastructure (terraform/) state file."
+  description = "Local path to the 1-infrastructure state file."
   type        = string
-  default     = "../terraform/terraform.tfstate"
+  default     = "../1-infrastructure/terraform.tfstate"
 }
 
 variable "gateway_name" {
@@ -70,7 +70,7 @@ variable "compute_class_name" {
 }
 
 variable "enable_blackwell_compute_class_tier" {
-  description = "Add a Blackwell (RTX PRO 6000) tier to the ComputeClass priority list. Default false — the demo runs on L4. Enable only if your project has Blackwell quota; align with terraform/variables.tf::enable_blackwell_pool."
+  description = "Add a Blackwell (RTX PRO 6000) tier to the ComputeClass priority list. Default false — the demo runs on L4. Enable only if your project has Blackwell quota; align with 1-infrastructure/variables.tf::enable_blackwell_pool."
   type        = bool
   default     = false
 }

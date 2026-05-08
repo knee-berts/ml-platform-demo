@@ -6,7 +6,7 @@
 #
 # Priority 1 matches the existing Terraform-managed Blackwell pool by config.
 # Priorities 2 and 3 rely on Node Auto-Provisioning (cluster_autoscaling.enabled
-# + nvidia-l4 resource_limits in terraform/clusters.tf) to materialize an L4
+# + nvidia-l4 resource_limits in 1-infrastructure/clusters.tf) to materialize an L4
 # pool on demand.
 apiVersion: cloud.google.com/v1
 kind: ComputeClass

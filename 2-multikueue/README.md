@@ -76,7 +76,7 @@ those Cloud Build configs produce by default.
 
 ## Prerequisites
 
-1. The 1-infrastructure stack (`../terraform/`) has been applied — provides
+1. The 1-infrastructure stack (`../1-infrastructure/`) has been applied — provides
    the GKE clusters, fleet membership, the Artifact Registry repos, and the
    `hub_cluster` / `worker_clusters` outputs this stack reads via
    `terraform_remote_state`.

@@ -31,7 +31,7 @@ with the data plane staged but idle — no GPUs in use until the demo runs.
 
 ## Prerequisites
 
-1. The 1-infrastructure stack (`../terraform/`) is applied — provides the
+1. The 1-infrastructure stack (`../1-infrastructure/`) is applied — provides the
    cluster handles, multi-cluster ingress feature, and the pod-snapshot
    buckets / Workload Identity SAs that the inference-routing chart consumes
    via `terraform_remote_state`.

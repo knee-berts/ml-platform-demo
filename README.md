@@ -195,7 +195,7 @@ export HF_TOKEN=hf_xxx     # https://huggingface.co/settings/tokens
 The script:
 
 1. Enables required APIs.
-2. `terraform apply` for [`terraform/`](terraform/) — clusters, fleet, IAM, AR repos, GCS buckets.
+2. `terraform apply` for [`1-infrastructure/`](1-infrastructure/) — clusters, fleet, IAM, AR repos, GCS buckets.
 3. Cloud-Builds and pushes 4 images to the project's Artifact Registry: `gcp-auth-plugin` (cloned from public source), `kueue-with-gcp-auth`, `least-disruption-dispatcher`, `vllm-blackwell`.
 4. Cloud-Build job downloads Llama 3.1 8B from HuggingFace using `HF_TOKEN` and uploads to `gs://<project>-model-weights/`.
 5. `terraform apply` for [`2-multikueue/`](2-multikueue/) — Kueue + JobSet + LWS + dispatcher across all clusters.
@@ -213,7 +213,7 @@ The script wraps three Terraform stacks. Each is also runnable standalone — se
 
 | Stack | What it provisions |
 |---|---|
-| [`terraform/`](terraform/) | GCP infrastructure: project services, proxy subnets, cluster SAs + IAM, Workload Identity bindings, multi-cluster ingress feature, the management + worker GKE clusters with NAP, GCS buckets (`model-weights`, `pod-snapshots`), and Artifact Registry repos (`vllm-blackwell`, `gcp-auth-plugin`). The Blackwell node pool is opt-in (`enable_blackwell_pool=true`); default is L4 via NAP. |
+| [`1-infrastructure/`](1-infrastructure/) | GCP infrastructure: project services, proxy subnets, cluster SAs + IAM, Workload Identity bindings, multi-cluster ingress feature, the management + worker GKE clusters with NAP, GCS buckets (`model-weights`, `pod-snapshots`), and Artifact Registry repos (`vllm-blackwell`, `gcp-auth-plugin`). The Blackwell node pool is opt-in (`enable_blackwell_pool=true`); default is L4 via NAP. |
 | [`2-multikueue/`](2-multikueue/) | In-cluster Kueue + MultiKueue control plane via the Helm provider: Kueue, JobSet, LeaderWorkerSet operators on every cluster; demo's WorkloadPriorityClasses, ResourceFlavor, ClusterQueue, LocalQueues; AdmissionCheck, MultiKueueConfig, MultiKueueClusters, ClusterProfiles on the hub; `least-disruption-dispatcher` Deployment (opt-in). |
 | [`3-multi-cluster-inference-gateway/`](3-multi-cluster-inference-gateway/) | In-cluster routing + application via Helm: cross-region Gateway, HTTPRoute + GCPBackendPolicy + HealthCheckPolicy on the hub; per-worker InferencePool, InferenceObjectives, EPP, ComputeClass (L4 spot → L4 on-demand by default), AutoscalingMetric, HPA, and the vLLM Deployment + HF token Secret. |
 
