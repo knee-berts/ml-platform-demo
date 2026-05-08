@@ -1,5 +1,5 @@
 output "management_cluster_name" {
-  description = "Name of the Autopilot management cluster."
+  description = "Name of the management cluster (Standard, hosts the multi-cluster Gateway and MultiKueue control plane)."
   value       = google_container_cluster.management.name
 }
 

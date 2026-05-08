@@ -1,17 +1,44 @@
-# Management cluster (Autopilot) — hosts the multi-cluster Gateway, HTTPRoute,
-# Kueue/MultiKueue control plane, and ArgoCD if used. No GPUs here.
+# ─────────────────────────────────────────────────────────────────────────────
+# Locals — derive accelerator type + disk type from the chosen machine type.
+# ─────────────────────────────────────────────────────────────────────────────
+
+locals {
+  static_accelerator_enabled = var.static_accelerator_machine_type != ""
+
+  # Map machine-type prefix → guest accelerator type and the gke-accelerator
+  # node label the inference manifests select on.
+  accelerator_type_by_prefix = {
+    "g4" = "nvidia-rtx-pro-6000"
+    "g2" = "nvidia-l4"
+  }
+
+  static_accelerator_prefix = local.static_accelerator_enabled ? split("-", var.static_accelerator_machine_type)[0] : ""
+  static_accelerator_type   = local.static_accelerator_enabled ? local.accelerator_type_by_prefix[local.static_accelerator_prefix] : ""
+
+  # g4 (Blackwell) only supports hyperdisk-balanced; g2 (L4) uses pd-balanced.
+  static_accelerator_disk_type = local.static_accelerator_prefix == "g4" ? "hyperdisk-balanced" : "pd-balanced"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Management cluster — Standard (NOT Autopilot). Hosts the multi-cluster
+# Gateway, HTTPRoute, Kueue/MultiKueue control plane. No GPUs.
 #
-# The `fleet { project = ... }` block auto-registers the cluster as a member
-# of the project's Fleet (created explicitly by google_gke_hub_fleet.default
-# in fleet.tf). The two `fleet-clusterinventory-*` resource_labels designate
-# this cluster as the inventory manager — fleet-clusterinventory then
-# auto-creates ClusterProfile resources in the kueue-system namespace for
-# every fleet member, which MultiKueueCluster references via clusterProfileRef.
+# The fleet { project = ... } block auto-registers the cluster as a member of
+# the project's Fleet (created explicitly by google_gke_hub_fleet.default in
+# fleet.tf). The two `fleet-clusterinventory-*` resource_labels designate this
+# cluster as the inventory manager — fleet-clusterinventory then auto-creates
+# ClusterProfile resources in the kueue-system namespace for every fleet
+# member, which MultiKueueCluster references via clusterProfileRef.
+# ─────────────────────────────────────────────────────────────────────────────
+
 resource "google_container_cluster" "management" {
-  name             = var.management_cluster_name
-  project          = var.project_id
-  location         = var.region
-  enable_autopilot = true
+  name     = var.management_cluster_name
+  project  = var.project_id
+  location = var.region
+
+  # Standard cluster: drop the auto-created default pool and add our own.
+  remove_default_node_pool = true
+  initial_node_count       = 1
 
   fleet {
     project = var.project_id
@@ -27,12 +54,6 @@ resource "google_container_cluster" "management" {
 
   release_channel {
     channel = var.release_channel
-  }
-
-  cluster_autoscaling {
-    auto_provisioning_defaults {
-      service_account = google_service_account.clusters["management"].email
-    }
   }
 
   monitoring_config {
@@ -64,12 +85,60 @@ resource "google_container_cluster" "management" {
   ]
 }
 
-# Worker clusters (Standard) — hold the GPU node pool, vLLM Deployments, EPP,
-# and InferencePool/InferenceObjective resources. The `fleet { project = ... }`
-# block auto-registers each worker as a fleet member; fleet-clusterinventory
-# then creates a ClusterProfile for it in the management cluster's
-# kueue-system namespace, which MultiKueueCluster.spec.clusterSource.clusterProfileRef
-# (configured by the 2-multikueue stack) targets.
+resource "google_container_node_pool" "management_default" {
+  name     = "${google_container_cluster.management.name}-default-pool"
+  project  = var.project_id
+  location = google_container_cluster.management.location
+  cluster  = google_container_cluster.management.name
+
+  autoscaling {
+    total_min_node_count = var.management_min_node_count
+    total_max_node_count = var.management_max_node_count
+    location_policy      = "BALANCED"
+  }
+
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
+
+  node_config {
+    machine_type    = var.management_machine_type
+    service_account = google_service_account.clusters["management"].email
+    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+    disk_size_gb    = var.management_disk_size_gb
+    disk_type       = "pd-balanced"
+    image_type      = "COS_CONTAINERD"
+
+    gcfs_config {
+      enabled = true
+    }
+
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [
+      node_count,
+    ]
+  }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Worker clusters — Standard. Hold vLLM Deployments, EPP, InferencePool,
+# InferenceObjective, and the worker side of MultiKueue. Fleet-registered.
+#
+# Default mode (happy path): no fixed GPU pool. The inference-gpu ComputeClass
+# drives Node Auto-Provisioning to create L4 (g2-standard-12) Spot or
+# on-demand pools when GPUs are needed, and lets the cluster autoscaler drain
+# them between demo runs.
+#
+# Heavy mode: set var.static_accelerator_machine_type and a fixed accelerator
+# pool is attached to every worker (see google_container_node_pool.static_accelerator).
+# ─────────────────────────────────────────────────────────────────────────────
+
 resource "google_container_cluster" "workers" {
   for_each = toset(var.worker_regions)
 
@@ -93,10 +162,8 @@ resource "google_container_cluster" "workers" {
     channel = var.release_channel
   }
 
-  # Default node pool is replaced by the GPU pool below; just give it a single
-  # small node and remove it after the GPU pool is up if you want to reduce cost.
+  remove_default_node_pool = true
   initial_node_count       = 1
-  remove_default_node_pool = false
 
   node_config {
     service_account = google_service_account.clusters["worker"].email
@@ -105,9 +172,9 @@ resource "google_container_cluster" "workers" {
     }
   }
 
-  # Node Auto-Provisioning. The inference-gpu ComputeClass uses NAP to
-  # materialize L4 Spot / L4 on-demand pools when Blackwell stocks out.
-  # The Blackwell pool itself stays Terraform-managed (see below).
+  # NAP backs the L4 Spot / L4 on-demand priorities of the inference-gpu
+  # ComputeClass. Even when a static accelerator pool is attached, NAP stays
+  # on so non-GPU system workloads can still scale.
   cluster_autoscaling {
     enabled             = true
     autoscaling_profile = "OPTIMIZE_UTILIZATION"
@@ -132,7 +199,7 @@ resource "google_container_cluster" "workers" {
       service_account = google_service_account.clusters["worker"].email
       oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
       image_type      = "COS_CONTAINERD"
-      disk_size       = var.gpu_node_disk_size_gb
+      disk_size       = var.static_accelerator_disk_size_gb
       disk_type       = "pd-balanced"
 
       management {
@@ -181,20 +248,81 @@ resource "google_container_cluster" "workers" {
   }
 }
 
-# RTX PRO 6000 Blackwell pool. The cluster autoscaler drains this to
-# gpu_node_min_count when no GPU workloads are scheduled, supporting the
-# between-demo scale-to-zero pattern in demo-preemption.sh::delete_inference_stack.
-resource "google_container_node_pool" "rtx_pro_6000" {
-  for_each = var.enable_blackwell_pool ? google_container_cluster.workers : {}
+# Generic system / non-GPU pool for each worker — small, autoscaled. Carries
+# control-plane workloads (EPP, kube-system add-ons, dispatcher pods) so they
+# don't compete with the GPU pool for placement.
+resource "google_container_node_pool" "worker_default" {
+  for_each = google_container_cluster.workers
 
-  name     = "${each.value.name}-rtx-pro-6000-pool"
+  name     = "${each.value.name}-default-pool"
   project  = var.project_id
   location = each.value.location
   cluster  = each.value.name
 
   autoscaling {
-    total_min_node_count = var.gpu_node_min_count
-    total_max_node_count = var.gpu_node_max_count
+    total_min_node_count = 1
+    total_max_node_count = 4
+    location_policy      = "BALANCED"
+  }
+
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
+
+  node_config {
+    machine_type    = "e2-standard-4"
+    service_account = google_service_account.clusters["worker"].email
+    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+    disk_size_gb    = 100
+    disk_type       = "pd-balanced"
+    image_type      = "COS_CONTAINERD"
+
+    gcfs_config {
+      enabled = true
+    }
+
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [
+      node_count,
+    ]
+  }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Static accelerator node pool (opt-in, heavy mode).
+#
+# Created only when var.static_accelerator_machine_type is non-empty. Accelerator
+# type is inferred from the machine-type prefix:
+#
+#   g4-* → Blackwell (nvidia-rtx-pro-6000)
+#   g2-* → L4        (nvidia-l4)
+#
+# The cluster autoscaler drains this to static_accelerator_min_node_count when
+# no GPU workloads are scheduled, supporting the between-demo scale-to-zero
+# pattern in demo-preemption.sh::delete_inference_stack.
+#
+# IMPORTANT: confirm GPU quota in every worker region before enabling. For
+# Blackwell pools (g4-*), supply var.static_accelerator_reservation — RTX PRO
+# 6000 capacity is scarce and creation typically fails without a reservation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "google_container_node_pool" "static_accelerator" {
+  for_each = local.static_accelerator_enabled ? google_container_cluster.workers : {}
+
+  name     = "${each.value.name}-${local.static_accelerator_type}-pool"
+  project  = var.project_id
+  location = each.value.location
+  cluster  = each.value.name
+
+  autoscaling {
+    total_min_node_count = var.static_accelerator_min_node_count
+    total_max_node_count = var.static_accelerator_max_node_count
     location_policy      = "ANY"
   }
 
@@ -204,17 +332,16 @@ resource "google_container_node_pool" "rtx_pro_6000" {
   }
 
   node_config {
-    machine_type    = var.gpu_machine_type
+    machine_type    = var.static_accelerator_machine_type
     service_account = google_service_account.clusters["worker"].email
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
-    disk_size_gb    = var.gpu_node_disk_size_gb
-    # g4 (Blackwell) only supports hyperdisk; non-g4 GPU machines use pd-balanced.
-    disk_type  = startswith(var.gpu_machine_type, "g4-") ? "hyperdisk-balanced" : "pd-balanced"
-    image_type = "COS_CONTAINERD"
+    disk_size_gb    = var.static_accelerator_disk_size_gb
+    disk_type       = local.static_accelerator_disk_type
+    image_type      = "COS_CONTAINERD"
 
     guest_accelerator {
-      type  = "nvidia-rtx-pro-6000"
-      count = var.gpu_count_per_node
+      type  = local.static_accelerator_type
+      count = var.static_accelerator_count_per_node
       gpu_driver_installation_config {
         gpu_driver_version = "LATEST"
       }
@@ -226,7 +353,7 @@ resource "google_container_node_pool" "rtx_pro_6000" {
 
     # Match the gke-accelerator label the demo manifests select on.
     labels = {
-      "cloud.google.com/gke-accelerator" = "nvidia-rtx-pro-6000"
+      "cloud.google.com/gke-accelerator" = local.static_accelerator_type
     }
 
     # Stop non-GPU pods from landing on these expensive nodes.
@@ -238,6 +365,15 @@ resource "google_container_node_pool" "rtx_pro_6000" {
 
     workload_metadata_config {
       mode = "GKE_METADATA"
+    }
+
+    dynamic "reservation_affinity" {
+      for_each = var.static_accelerator_reservation != "" ? [1] : []
+      content {
+        consume_reservation_type = "SPECIFIC_RESERVATION"
+        key                      = "compute.googleapis.com/reservation-name"
+        values                   = [var.static_accelerator_reservation]
+      }
     }
   }
 

@@ -12,22 +12,21 @@ pattern using the modern (v3) Helm provider.
 | `inference-crds` | mgmt + each worker | local `./charts/inference-crds` | InferenceObjective CRD (alpha SIG resource not auto-installed by GKE). |
 | `gateway-infrastructure` | mgmt | local `./charts/multi-cluster-inference-gateway` | Multi-cluster Gateway resource with regional ephemeral addresses. Mirrors the upstream `fleet-charts/multi-cluster-inference-gateway` chart. |
 | `mgmt-routing` | mgmt | local `./charts/mgmt-routing` | HTTPRoute → GCPInferencePoolImport, GCPBackendPolicy with kv-cache custom metric, HealthCheckPolicy. |
-| `inference-routing` | each worker | local `./charts/inference-routing` | InferencePool (with `networking.gke.io/export: "True"`), InferenceObjective × 2, EPP (Deployment + RBAC + ConfigMap + Service + PodMonitoring + metrics-reader secret), ComputeClass, AutoscalingMetric, HPA, pod-snapshot config. |
+| `inference-routing` | each worker | local `./charts/inference-routing` | InferencePool (with `networking.gke.io/export: "True"`), InferenceObjective × 2, EPP (Deployment + RBAC + ConfigMap + Service + PodMonitoring + metrics-reader secret), ComputeClass, AutoscalingMetric, pod-snapshot config. |
+| `inference-application` | each worker | local `./charts/inference-application` | vLLM Deployment + ConfigMap + Service + ServiceAccount + HF token Secret. Replicas default to 0; the demo preflight scales them up. |
 
 ## What this does NOT install
 
-- The vLLM Deployment + ConfigMap + Service. That's the application data plane;
-  apply `workers/gpu-deployment.yaml` (and `workers/secret.yaml` for HF token,
-  `workers/baseline-load.yaml` if you want the warm-up generator) with `kubectl`.
 - Any Kueue resources. Those live in the `2-multikueue` stack.
+- The HPA — see "HPA ownership" below.
 
 ## HPA ownership
 
 The HPA is **not** part of this chart. `demo-preemption.sh`'s pre-flight applies
-`kueue/hpa-inference.yaml` (`min=2`, `max=6`, KV-cache target 0.45) when the
-demo starts; cleanup deletes the HPA so the inference Deployment falls back
-to its chart default of `replicas: 0` and the GPU pool drains. Install ends
-with the data plane staged but idle — no GPUs in use until the demo runs.
+`workers/hpa-inference.yaml` (`min=2`, `max=6`, KV-cache target 0.45) when the
+demo starts; cleanup deletes the HPA and scales the inference Deployment back
+to 0 so the GPU pool drains. Install ends with the data plane staged but idle —
+no GPUs in use until the demo runs.
 
 ## Prerequisites
 
@@ -65,7 +64,3 @@ Then apply the application data plane (vLLM Deployment + Secret) with
 - `inference-crds` is intentionally minimal — only InferenceObjective.
   InferencePool ships with multi-cluster-ingress on GKE. If you move to a
   non-GKE cluster, add the upstream InferencePool CRD here.
-- The ComputeClass priorities are duplicated between this chart and
-  `workers/computeclass.yaml`. The workers/ copy stays for the existing
-  kubectl-based flow; once you migrate fully to Terraform, delete the
-  workers/ copy.

@@ -1,0 +1,60 @@
+# Reusable training-critical pre-training JobSet — 6 replicas × 1 GPU, sleep 600.
+# Used by demo-preemption.sh::submit_critical_job to demonstrate that the
+# highest priority class preempts inference servers.
+#
+# Render with:
+#   JOB_NAME=pre-training-1 \
+#     envsubst < workers/critical-pretraining.yaml | kubectl create --context <ctx> -f -
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: ${JOB_NAME}
+  namespace: training-jobs
+  labels:
+    kueue.x-k8s.io/queue-name: training-queue
+    kueue.x-k8s.io/priority-class: training-critical
+spec:
+  replicatedJobs:
+    - name: worker
+      replicas: 6
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              # Schedule via the inference-gpu ComputeClass (3-mcig stack), so
+              # training pods land on the same Spot-first L4 fallback as the
+              # inference Deployment.
+              nodeSelector:
+                cloud.google.com/compute-class: inference-gpu
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+                # Spot taint so training pods can land on Spot priority of the ComputeClass.
+                - key: cloud.google.com/gke-spot
+                  operator: Equal
+                  value: "true"
+                  effect: NoSchedule
+                - key: sandbox.gke.io/runtime
+                  operator: Exists
+                  effect: NoSchedule
+              containers:
+                - name: training-sim
+                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
+                  command: ["bash", "-c"]
+                  args:
+                    - |
+                      echo "=== Pre-Training Job (1 GPU) ==="
+                      nvidia-smi
+                      echo "Pre-training for 10 minutes..."
+                      sleep 600
+                      echo "Pre-training complete."
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+              restartPolicy: Never

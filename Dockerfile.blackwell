@@ -3,6 +3,10 @@
 # Supports: LoRA, prefix caching / KV-cache routing, OpenAI API
 # Base: Official vLLM OpenAI server image (CUDA 13.0, sm_120 built in)
 #
+# Use this Dockerfile when var.static_accelerator_machine_type starts with
+# `g4-` (Blackwell). For L4 (`g2-*`) or the NAP-driven happy path, use
+# Dockerfile.l4 — the runtime env defaults are tuned differently.
+#
 # NOTE: Building vLLM from source inside NGC 25.05 (PyTorch 2.8) fails due to
 # a missing torch/headeronly/util/Float8_e4m3fnuz.h header in that release.
 # The official vllm/vllm-openai image ships with sm_120 CUDA kernels precompiled

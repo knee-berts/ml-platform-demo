@@ -142,66 +142,14 @@ show_gpu_state() {
   echo -e "  ${DIM}Legend: ${CYAN}█${NC}${DIM}=inference ${MAGENTA}█${NC}${DIM}=training ░=free${NC}"
 }
 
-# ── Helper: submit experiment (1 GPU, 30s) ────────────────────────────────────
+# ── Helper: submit experiment (1 GPU, 60s) ────────────────────────────────────
 submit_small_job() {
   local job_name=$1
   local job_num=$2
   kubectl delete jobset "$job_name" -n training-jobs --context mgmt --ignore-not-found=true 2>/dev/null
-  cat <<EOF | kubectl create --context mgmt -f - 2>&1 | grep -v "^$"
-apiVersion: jobset.x-k8s.io/v1alpha2
-kind: JobSet
-metadata:
-  name: $job_name
-  namespace: training-jobs
-  labels:
-    kueue.x-k8s.io/queue-name: training-queue
-    kueue.x-k8s.io/priority-class: training-low
-spec:
-  replicatedJobs:
-    - name: worker
-      replicas: 1
-      template:
-        spec:
-          parallelism: 1
-          completions: 1
-          backoffLimit: 0
-          template:
-            spec:
-              # Schedule via the inference-gpu ComputeClass (3-mcig stack), so
-              # training pods land on the same Spot-first L4 fallback as the
-              # inference Deployment.
-              nodeSelector:
-                cloud.google.com/compute-class: inference-gpu
-              tolerations:
-                - key: nvidia.com/gpu
-                  operator: Exists
-                  effect: NoSchedule
-                # Spot taint so training pods can land on Spot priority of the ComputeClass.
-                - key: cloud.google.com/gke-spot
-                  operator: Equal
-                  value: "true"
-                  effect: NoSchedule
-                - key: sandbox.gke.io/runtime
-                  operator: Exists
-                  effect: NoSchedule
-              containers:
-                - name: training-sim
-                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
-                  command: ["bash", "-c"]
-                  args:
-                    - |
-                      echo "=== Experiment $job_num ==="
-                      nvidia-smi
-                      echo "Running experiment for 60 seconds..."
-                      sleep 60
-                      echo "Experiment complete."
-                  resources:
-                    requests:
-                      nvidia.com/gpu: "1"
-                    limits:
-                      nvidia.com/gpu: "1"
-              restartPolicy: Never
-EOF
+  JOB_NAME="$job_name" JOB_NUM="$job_num" \
+    envsubst < "$SCRIPT_DIR/workers/experiment.yaml" \
+    | kubectl create --context mgmt -f - 2>&1 | grep -v "^$"
 }
 
 # ── Helper: submit pre-training job (6 replicas x 1 GPU each, 10min) ────────
@@ -209,61 +157,9 @@ submit_critical_job() {
   local job_name=${1:-pre-training-1}
   local ctx=${2:-mgmt}
   kubectl delete jobset "$job_name" -n training-jobs --context "$ctx" --ignore-not-found=true 2>/dev/null
-  cat <<EOF | kubectl create --context "$ctx" -f - 2>&1 | grep -v "^$"
-apiVersion: jobset.x-k8s.io/v1alpha2
-kind: JobSet
-metadata:
-  name: $job_name
-  namespace: training-jobs
-  labels:
-    kueue.x-k8s.io/queue-name: training-queue
-    kueue.x-k8s.io/priority-class: training-critical
-spec:
-  replicatedJobs:
-    - name: worker
-      replicas: 6
-      template:
-        spec:
-          parallelism: 1
-          completions: 1
-          backoffLimit: 0
-          template:
-            spec:
-              # Schedule via the inference-gpu ComputeClass (3-mcig stack), so
-              # training pods land on the same Spot-first L4 fallback as the
-              # inference Deployment.
-              nodeSelector:
-                cloud.google.com/compute-class: inference-gpu
-              tolerations:
-                - key: nvidia.com/gpu
-                  operator: Exists
-                  effect: NoSchedule
-                # Spot taint so training pods can land on Spot priority of the ComputeClass.
-                - key: cloud.google.com/gke-spot
-                  operator: Equal
-                  value: "true"
-                  effect: NoSchedule
-                - key: sandbox.gke.io/runtime
-                  operator: Exists
-                  effect: NoSchedule
-              containers:
-                - name: training-sim
-                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
-                  command: ["bash", "-c"]
-                  args:
-                    - |
-                      echo "=== Pre-Training Job (1 GPU) ==="
-                      nvidia-smi
-                      echo "Pre-training for 10 minutes..."
-                      sleep 600
-                      echo "Pre-training complete."
-                  resources:
-                    requests:
-                      nvidia.com/gpu: "1"
-                    limits:
-                      nvidia.com/gpu: "1"
-              restartPolicy: Never
-EOF
+  JOB_NAME="$job_name" \
+    envsubst < "$SCRIPT_DIR/workers/critical-pretraining.yaml" \
+    | kubectl create --context "$ctx" -f - 2>&1 | grep -v "^$"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -288,8 +184,8 @@ wait
 # Clean up bad inference pods
 cleanup_bad_pods
 # Reset HPAs and scale
-kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-east1 2>/dev/null || true
-kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-central1 2>/dev/null || true
+kubectl apply -f "$SCRIPT_DIR/workers/hpa-inference.yaml" --context worker-east1 2>/dev/null || true
+kubectl apply -f "$SCRIPT_DIR/workers/hpa-inference.yaml" --context worker-central1 2>/dev/null || true
 kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-east1 2>/dev/null || true
 kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-central1 2>/dev/null || true
 echo -e "${GREEN}Pre-flight complete.${NC}"

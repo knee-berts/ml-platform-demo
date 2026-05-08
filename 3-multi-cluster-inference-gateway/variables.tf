@@ -70,7 +70,7 @@ variable "compute_class_name" {
 }
 
 variable "enable_blackwell_compute_class_tier" {
-  description = "Add a Blackwell (RTX PRO 6000) tier to the ComputeClass priority list. Default false — the demo runs on L4. Enable only if your project has Blackwell quota; align with 1-infrastructure/variables.tf::enable_blackwell_pool."
+  description = "Add a Blackwell (RTX PRO 6000) tier to the ComputeClass priority list. Default false — the demo runs on L4. Enable only if your project has Blackwell quota or a static `g4-*` pool from 1-infrastructure/ (var.static_accelerator_machine_type)."
   type        = bool
   default     = false
 }

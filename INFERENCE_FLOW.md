@@ -1,23 +1,26 @@
 # Life of an Inference Request
 
 This document traces a single inference request from the moment it leaves the
-client to the moment the first token is generated on a Blackwell GPU, showing
-every routing decision, queue, and handoff along the way.
+client to the moment the first token is generated, showing every routing
+decision, queue, and handoff along the way. Concrete numbers below assume the
+Blackwell static-pool deployment (RTX PRO 6000 / 96 GB VRAM); the L4 happy
+path runs with smaller `--max-num-seq` and `--max-model-len` and `fp8` KV
+cache to fit Llama 3.1 8B in 24 GB.
 
 ---
 
 ## The Setup
 
-Three GKE clusters form the platform:
+Three GKE Standard clusters form the platform:
 
 | Cluster | Role | GPU Capacity |
 |---------|------|--------------|
 | **mgmt** | Hosts the cross-region Gateway. No GPUs. | -- |
-| **ai-worker-us-east1** | Primary inference region | 8x RTX PRO 6000 |
-| **ai-worker-us-west3** | Spillover / training region | 8x RTX PRO 6000 |
+| **ai-worker-<region-A>** | Primary inference region | up to 8 GPUs (L4 via NAP, or RTX PRO 6000 via static pool) |
+| **ai-worker-<region-B>** | Spillover / training region | up to 8 GPUs |
 
 Each worker cluster runs:
-- 2-6 vLLM pods (Llama-3.1-8B-Instruct on Blackwell sm_120)
+- 2-6 vLLM pods (Llama-3.1-8B-Instruct; sm_89 on L4 or sm_120 on Blackwell)
 - 1 Endpoint Picker (EPP) pod with flow control enabled
 - Kueue managing GPU quota across inference and training workloads
 
@@ -210,7 +213,7 @@ vLLM's v1 engine (`VLLM_USE_V1=1`) with FlashInfer attention backend
 
 2. **KV block allocation**: vLLM's paged attention allocator reserves KV-cache
    blocks in GPU VRAM. With `expandable_segments:True`, PyTorch's CUDA allocator
-   minimizes fragmentation across the 48GB VRAM.
+   minimizes fragmentation across the 96 GB Blackwell VRAM (24 GB on L4).
 
 3. **Prefill**: The prompt tokens are processed through the transformer layers
    in a single forward pass, using FlashInfer v2 tiling kernels optimized for

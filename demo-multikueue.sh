@@ -16,6 +16,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Fix for terminals not recognized on remote hosts (e.g. Ghostty)
 case "$TERM" in xterm-ghostty|*-unknown) export TERM=xterm-256color ;; esac
 
@@ -162,84 +164,9 @@ submit_job() {
   local job_name=$1
   local job_num=$2
 
-  cat <<EOF | kubectl apply --context mgmt -f - 2>&1 | grep -v "^$"
-apiVersion: jobset.x-k8s.io/v1alpha2
-kind: JobSet
-metadata:
-  name: $job_name
-  namespace: training-jobs
-  labels:
-    kueue.x-k8s.io/queue-name: training-queue
-    kueue.x-k8s.io/priority-class: training-low
-spec:
-  replicatedJobs:
-    - name: leader
-      replicas: 1
-      template:
-        spec:
-          parallelism: 1
-          completions: 1
-          backoffLimit: 0
-          template:
-            spec:
-              nodeSelector:
-                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
-              tolerations:
-                - key: nvidia.com/gpu
-                  operator: Exists
-                  effect: NoSchedule
-                - key: sandbox.gke.io/runtime
-                  operator: Exists
-                  effect: NoSchedule
-              containers:
-                - name: training-sim
-                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
-                  command: ["bash", "-c"]
-                  args:
-                    - |
-                      echo "=== Training Job $job_num ==="
-                      nvidia-smi
-                      sleep infinity
-                  resources:
-                    requests:
-                      nvidia.com/gpu: "1"
-                    limits:
-                      nvidia.com/gpu: "1"
-              restartPolicy: Never
-    - name: workers
-      replicas: 1
-      template:
-        spec:
-          parallelism: 1
-          completions: 1
-          backoffLimit: 0
-          template:
-            spec:
-              nodeSelector:
-                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
-              tolerations:
-                - key: nvidia.com/gpu
-                  operator: Exists
-                  effect: NoSchedule
-                - key: sandbox.gke.io/runtime
-                  operator: Exists
-                  effect: NoSchedule
-              containers:
-                - name: training-sim
-                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
-                  command: ["bash", "-c"]
-                  args:
-                    - |
-                      echo "=== Training Job $job_num Worker ==="
-                      nvidia-smi
-                      sleep infinity
-                  resources:
-                    requests:
-                      nvidia.com/gpu: "1"
-                    limits:
-                      nvidia.com/gpu: "1"
-              restartPolicy: Never
-EOF
+  JOB_NAME="$job_name" JOB_NUM="$job_num" \
+    envsubst < "$SCRIPT_DIR/workers/training-job.yaml" \
+    | kubectl apply --context mgmt -f - 2>&1 | grep -v "^$"
 }
 
 wait_for_job() {

@@ -1,0 +1,53 @@
+# ============================================================
+# vLLM on NVIDIA L4 (Ada Lovelace, sm_89 / CC 8.9)
+# Supports: LoRA, prefix caching / KV-cache routing, OpenAI API
+# Base: Official vLLM OpenAI server image (multi-arch: sm_75 → sm_120)
+#
+# Use this Dockerfile for the demo's happy path (NAP-driven g2-standard-12
+# pools) and any static `g2-*` accelerator pool. For Blackwell static pools
+# (`g4-*`), use Dockerfile.blackwell — that image enables the FlashInfer
+# attention backend and tuning that's only worth it on sm_120.
+#
+# Why the L4 path is different in practice:
+#   * 24 GB HBM/GDDR6 vs 96 GB on Blackwell — KV cache must be tighter.
+#   * fp8 KV cache (`--kv-cache-dtype fp8`) is required to fit Llama 3.1 8B.
+#   * FA2 is the supported attention backend; FA3 / FlashInfer aren't worth
+#     the install cost on sm_89.
+# ============================================================
+# syntax=docker/dockerfile:1
+
+ARG VLLM_TAG=latest
+FROM vllm/vllm-openai:${VLLM_TAG}
+
+# ── Labels ────────────────────────────────────────────────────
+LABEL maintainer="your-team@example.com" \
+      description="vLLM inference server for NVIDIA L4 (sm_89)" \
+      cuda="12.4+" \
+      vllm="latest"
+
+# ── L4 runtime environment ────────────────────────────────────
+ENV \
+    # Flash Attention v2 is the stable, fastest path on Ada Lovelace (sm_89).
+    VLLM_ATTENTION_BACKEND=FLASH_ATTN \
+    VLLM_FLASH_ATTN_VERSION=2 \
+    # Required for prefix caching / chunked prefill; also forces V1 engine
+    # on since LoRA disables auto-detection in some vLLM builds.
+    VLLM_USE_V1=1 \
+    HF_HOME=/workspace/hf_cache \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN mkdir -p /workspace/hf_cache /workspace/models
+
+# ── Expose OpenAI-compatible API port ─────────────────────────
+EXPOSE 8000
+
+# ── Health check ──────────────────────────────────────────────
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# ── Default entrypoint: OpenAI-compatible API server ──────────
+# Runtime flags (--model, --enable-lora, --kv-cache-dtype fp8, --gpu-memory-utilization 0.95,
+# --max-model-len 2048, --max-num-seq 16, etc.) are passed at deploy time.
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+CMD ["--help"]

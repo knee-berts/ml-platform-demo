@@ -29,8 +29,19 @@
 #                                   SAs in policy-restricted projects). Enable
 #                                   APIs manually with `gcloud services enable`
 #                                   when this is false.
-#   ENABLE_BLACKWELL_POOL           Stack 1. Set to "true" only if the project has
-#                                   RTX PRO 6000 quota in WORKER_REGIONS.
+#   STATIC_ACCELERATOR_MACHINE_TYPE Stack 1. Set to a GPU machine type to attach
+#                                   a fixed accelerator pool to every worker
+#                                   cluster (e.g. "g4-standard-48" for Blackwell,
+#                                   "g2-standard-12" for L4). Empty/unset = the
+#                                   demo's happy path: no static pool, NAP
+#                                   provisions L4 on demand. Confirm GPU quota
+#                                   and (for g4-*) supply a reservation.
+#   STATIC_ACCELERATOR_RESERVATION  Stack 1. Compute Engine reservation name to
+#                                   consume for the static pool. Strongly
+#                                   recommended for Blackwell.
+#   VLLM_DOCKERFILE                 Image build. "Dockerfile.l4" (default, happy
+#                                   path or g2-* static pool) or
+#                                   "Dockerfile.blackwell" (g4-* static pool).
 #   ENABLE_POD_SNAPSHOT             Stack 3. Set to "false" on clusters without
 #                                   the podsnapshot.gke.io CRDs (non-Enterprise GKE).
 #
@@ -66,6 +77,17 @@ WORKER_REGIONS="${WORKER_REGIONS:-us-east1 us-central1}"
 SKIP_DEMO="${SKIP_DEMO:-0}"
 SKIP_IMAGE_BUILDS="${SKIP_IMAGE_BUILDS:-0}"
 SKIP_WEIGHTS_UPLOAD="${SKIP_WEIGHTS_UPLOAD:-0}"
+
+# Default vLLM Dockerfile follows the static-accelerator selection: g4-* →
+# Dockerfile.blackwell, anything else (including the empty happy path) →
+# Dockerfile.l4. VLLM_DOCKERFILE wins if set explicitly.
+if [ -z "${VLLM_DOCKERFILE:-}" ]; then
+  if [[ "${STATIC_ACCELERATOR_MACHINE_TYPE:-}" == g4-* ]]; then
+    VLLM_DOCKERFILE="Dockerfile.blackwell"
+  else
+    VLLM_DOCKERFILE="Dockerfile.l4"
+  fi
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -157,8 +179,9 @@ step "1-infrastructure (clusters, fleet, AR, buckets)"
   echo "project_id     = \"$PROJECT_ID\""
   echo "region         = \"$REGION\""
   echo "worker_regions = [$(printf '"%s",' $WORKER_REGIONS | sed 's/,$//')]"
-  [ -n "${MANAGE_PROJECT_SERVICES:-}" ] && echo "manage_project_services = $MANAGE_PROJECT_SERVICES"
-  [ -n "${ENABLE_BLACKWELL_POOL:-}" ]   && echo "enable_blackwell_pool   = $ENABLE_BLACKWELL_POOL"
+  [ -n "${MANAGE_PROJECT_SERVICES:-}" ]         && echo "manage_project_services         = $MANAGE_PROJECT_SERVICES"
+  [ -n "${STATIC_ACCELERATOR_MACHINE_TYPE:-}" ] && echo "static_accelerator_machine_type = \"$STATIC_ACCELERATOR_MACHINE_TYPE\""
+  [ -n "${STATIC_ACCELERATOR_RESERVATION:-}" ]  && echo "static_accelerator_reservation  = \"$STATIC_ACCELERATOR_RESERVATION\""
 } > "$TF_INFRA/terraform.tfvars"
 
 (cd "$TF_INFRA" && $TERRAFORM init -input=false -upgrade) >/dev/null
@@ -251,7 +274,7 @@ DISPATCHER_PID=$!
   cd "$ROOT_DIR" && \
   gcloud builds submit . --project="$PROJECT_ID" \
     --config 3-multi-cluster-inference-gateway/docker/vllm/cloudbuild.yaml \
-    --substitutions=_TAG=latest \
+    --substitutions=_TAG=latest,_DOCKERFILE=$VLLM_DOCKERFILE \
     >/tmp/install-build-vllm.log 2>&1
 } &
 VLLM_PID=$!
@@ -390,6 +413,8 @@ echo ""
 echo "  Inference clusters: ${WORKER_CLUSTER_NAMES[*]}"
 echo "  Mgmt cluster:       $MGMT_CLUSTER_NAME ($MGMT_CLUSTER_LOCATION)"
 echo "  vLLM image:         $VLLM_IMAGE"
+echo "  vLLM Dockerfile:    $VLLM_DOCKERFILE"
+echo "  Accelerator pool:   ${STATIC_ACCELERATOR_MACHINE_TYPE:-(NAP-driven L4, happy path)}"
 echo "  Model weights:      $MODEL_WEIGHTS_PATH"
 echo ""
 

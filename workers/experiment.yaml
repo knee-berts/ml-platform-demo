@@ -1,0 +1,60 @@
+# Reusable training-low experiment template — 1 GPU, runs for 60s then exits.
+# Used by demo-preemption.sh::submit_small_job to fan out 40 short experiments
+# that get preempted by inference scale-out under load.
+#
+# Render with:
+#   JOB_NAME=experiment-1 JOB_NUM=1 \
+#     envsubst < workers/experiment.yaml | kubectl create --context mgmt -f -
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: ${JOB_NAME}
+  namespace: training-jobs
+  labels:
+    kueue.x-k8s.io/queue-name: training-queue
+    kueue.x-k8s.io/priority-class: training-low
+spec:
+  replicatedJobs:
+    - name: worker
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              # Schedule via the inference-gpu ComputeClass (3-mcig stack), so
+              # training pods land on the same Spot-first L4 fallback as the
+              # inference Deployment.
+              nodeSelector:
+                cloud.google.com/compute-class: inference-gpu
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+                # Spot taint so training pods can land on Spot priority of the ComputeClass.
+                - key: cloud.google.com/gke-spot
+                  operator: Equal
+                  value: "true"
+                  effect: NoSchedule
+                - key: sandbox.gke.io/runtime
+                  operator: Exists
+                  effect: NoSchedule
+              containers:
+                - name: training-sim
+                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
+                  command: ["bash", "-c"]
+                  args:
+                    - |
+                      echo "=== Experiment ${JOB_NUM} ==="
+                      nvidia-smi
+                      echo "Running experiment for 60 seconds..."
+                      sleep 60
+                      echo "Experiment complete."
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+              restartPolicy: Never

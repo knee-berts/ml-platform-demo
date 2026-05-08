@@ -13,9 +13,9 @@ eppImage: registry.k8s.io/gateway-api-inference-extension/epp:v1.4.0
 saturationKvCacheUtilThreshold: 0.90
 saturationQueueDepthThreshold: 100
 
-# When true, the HPA scales from 0 with the EPP flow control queue depth as
-# the wake-up metric (matches kueue/hpa-inference-west3.yaml).
-# When false, the HPA uses min=2 and KV-cache only (matches kueue/hpa-inference.yaml).
+# Reference HPA spec: workers/hpa-inference.yaml (min=2, KV-cache target 0.45).
+# Applied at demo-time by demo-preemption.sh; the chart itself does not
+# install the HPA so install ends with no GPU pressure.
 
 # Pod snapshot config — provided by the 1-infrastructure stack.
 # Requires the GKE Pod Snapshot feature (podsnapshot.gke.io CRDs) to be

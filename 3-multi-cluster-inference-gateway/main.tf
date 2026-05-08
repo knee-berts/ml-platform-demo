@@ -137,7 +137,7 @@ resource "helm_release" "mgmt_routing" {
 # One release per worker, each carrying: namespace, ComputeClass, InferencePool,
 # InferenceObjectives, EPP (Deployment + RBAC + ConfigMap + Service + monitoring),
 # AutoscalingMetric, and pod-snapshot config. The HPA itself is owned by
-# demo-preemption.sh (kueue/hpa-inference.yaml) so install leaves the data
+# demo-preemption.sh (workers/hpa-inference.yaml) so install leaves the data
 # plane idle — pods only come up when the demo runs.
 
 resource "helm_release" "inference_routing_worker0" {
