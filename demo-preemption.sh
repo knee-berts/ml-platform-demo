@@ -109,8 +109,8 @@ do_cleanup() {
   cleanup_bad_pods
   # Drain GPUs: delete HPAs and scale inference Deployment to 0 so the
   # cluster autoscaler reclaims L4 nodes between demo runs. Install staged
-  # the Deployment at replicas=0, so this returns the data plane to its
-  # idle baseline.
+  # the Deployment at replicas=0 (via the Helm chart), so this returns the
+  # data plane to its idle baseline.
   echo -e "  ${DIM}Deleting HPAs and scaling inference Deployment to 0...${NC}"
   kubectl delete hpa vllm-inference-hpa -n inference-server --context worker-east1 --ignore-not-found=true 2>/dev/null || true
   kubectl delete hpa vllm-inference-hpa -n inference-server --context worker-central1 --ignore-not-found=true 2>/dev/null || true
@@ -183,7 +183,8 @@ kubectl delete jobset "pre-training-2" -n training-jobs --context mgmt --ignore-
 wait
 # Clean up bad inference pods
 cleanup_bad_pods
-# Reset HPAs and scale
+# Reset HPAs and scale the inference Deployment up. The Helm chart staged
+# the Deployment at replicas=0; the HPA pulls it back to min=2 once applied.
 kubectl apply -f "$SCRIPT_DIR/workers/hpa-inference.yaml" --context worker-east1 2>/dev/null || true
 kubectl apply -f "$SCRIPT_DIR/workers/hpa-inference.yaml" --context worker-central1 2>/dev/null || true
 kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-east1 2>/dev/null || true
