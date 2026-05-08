@@ -129,7 +129,7 @@ This launches load generator pods inside the target cluster and opens a live Ric
 - **Kueue panel** — HPA replica counts and scaling metrics, workload table with cluster/type/status, training pod counts, and a live event log showing preemptions and rescheduling
 - **Stats panel** — Load generator target, concurrency, success/error counts, RPS
 
-> **Note:** `demo-reset.sh`, `demo-multikueue.sh`, and `load_test.py` currently reference the cluster contexts `worker-east1` and `worker-west3`. If you deploy with the install.sh defaults (`us-east1` + `us-central1`) you'll need to update those scripts to use `worker-central1` instead, or override `WORKER_REGIONS=us-east1 us-west3` at install time. `demo-preemption.sh` has already been updated to `east1` + `central1`.
+> **Note:** All demo scripts target the `worker-east1` and `worker-central1` contexts (matching the install.sh defaults). If you override `WORKER_REGIONS` to a different second region, you'll need to patch the cluster names in `demo-reset.sh`, `demo-multikueue.sh`, `demo-preemption.sh`, and `load_test.py`.
 
 The demo's training JobSets and the inference HPA live as reusable YAML templates in [`workers/`](workers/) and are rendered at demo time with `envsubst`:
 
@@ -171,7 +171,7 @@ python3 load_test.py --mode both --target-cluster east1 --concurrency 300
 | Flag | Default | Description |
 |---|---|---|
 | `--mode` | `both` | `dashboard`, `load`, or `both` |
-| `--target-cluster` | `east1` | Which cluster to target (`east1` or `west3`). The other becomes the spillover destination. |
+| `--target-cluster` | `east1` | Which cluster to target (`east1` or `central1`). The other becomes the spillover destination. |
 | `--vip` | auto-discovered | Load balancer VIP address |
 | `--concurrency` | `300` | Number of concurrent request workers |
 | `--max-tokens` | `2048` | Max tokens per completion (higher = longer in-flight = more KV blocks held) |

@@ -7,10 +7,10 @@
 # where HPA can scale to 6 and Kueue preempts training jobs.
 #
 # Usage:
-#   ./demo-reset.sh --target east1                  # Load enters east1, spillover to west3
-#   ./demo-reset.sh --target west3                  # Load enters west3, spillover to east1
+#   ./demo-reset.sh --target east1                  # Load enters east1, spillover to central1
+#   ./demo-reset.sh --target central1                  # Load enters central1, spillover to east1
 #   ./demo-reset.sh --multikueue --target east1     # Reset only training jobs
-#   ./demo-reset.sh --loadtest --target west3       # Reset only load test
+#   ./demo-reset.sh --loadtest --target central1       # Reset only load test
 # ─────────────────────────────────────────────────────────────────────────────
 set -eE
 
@@ -24,7 +24,7 @@ for arg in "$@"; do
     --loadtest) MODE="loadtest" ;;
     --target) :;; # next arg
     east1) TARGET="east1" ;;
-    west3) TARGET="west3" ;;
+    central1) TARGET="central1" ;;
   esac
 done
 # Handle --target <value>
@@ -38,10 +38,10 @@ done
 MODE="${MODE:-all}"
 
 if [ -z "$TARGET" ]; then
-  echo "Usage: $0 [--all | --multikueue | --loadtest] --target <east1|west3>"
+  echo "Usage: $0 [--all | --multikueue | --loadtest] --target <east1|central1>"
   echo ""
-  echo "  --target east1   Load enters east1 VIP, spills to west3 (west3 HPA max=6)"
-  echo "  --target west3   Load enters west3 VIP, spills to east1 (east1 HPA max=6)"
+  echo "  --target east1   Load enters east1 VIP, spills to central1 (central1 HPA max=6)"
+  echo "  --target central1   Load enters central1 VIP, spills to east1 (east1 HPA max=6)"
   echo "  --all            Reset everything (default)"
   echo "  --multikueue     Reset only training jobs"
   echo "  --loadtest       Reset only load test"
@@ -50,9 +50,9 @@ fi
 
 if [ "$TARGET" = "east1" ]; then
   TARGET_CTX="worker-east1"
-  OTHER_CTX="worker-west3"
+  OTHER_CTX="worker-central1"
 else
-  TARGET_CTX="worker-west3"
+  TARGET_CTX="worker-central1"
   OTHER_CTX="worker-east1"
 fi
 
@@ -64,8 +64,8 @@ remediate_disk_pressure() {
   # Replace GPU nodes with DiskPressure so pods can schedule on fresh nodes.
   # Root cause: HF model cache fills the boot disk across pod restarts.
   echo "--- Checking for DiskPressure on GPU nodes ---"
-  for ctx in worker-east1 worker-west3; do
-    local label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+  for ctx in worker-east1 worker-central1; do
+    local label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "central1")
     for node in $(kubectl get nodes --context $ctx -l cloud.google.com/gke-accelerator=nvidia-rtx-pro-6000 \
         -o jsonpath='{range .items[*]}{.metadata.name}={.status.conditions[?(@.type=="DiskPressure")].status}{" "}{end}' 2>/dev/null); do
       name="${node%%=*}"
@@ -84,8 +84,8 @@ remediate_disk_pressure() {
   done
 
   # If any nodes were replaced, wait for new ones to become Ready
-  for ctx in worker-east1 worker-west3; do
-    local label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+  for ctx in worker-east1 worker-central1; do
+    local label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "central1")
     local expected=2
     for i in $(seq 1 60); do
       local ready_count
@@ -112,21 +112,21 @@ reset_loadtest() {
   # Kill any load generator pods
   echo "--- Killing load generators ---"
   kubectl delete pod kv-load-gen -n inference-server --context worker-east1 --ignore-not-found --wait=false 2>/dev/null
-  kubectl delete pod kv-load-gen-west3 -n inference-server --context worker-west3 --ignore-not-found --wait=false 2>/dev/null
+  kubectl delete pod kv-load-gen-central1 -n inference-server --context worker-central1 --ignore-not-found --wait=false 2>/dev/null
 
   # Pause HPAs to prevent scaling while we clean up
   echo "--- Pausing HPAs ---"
   kubectl patch hpa vllm-inference-hpa -n inference-server --context worker-east1 --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":4}}' 2>/dev/null
-  kubectl patch hpa vllm-inference-hpa -n inference-server --context worker-west3 --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":4}}' 2>/dev/null
+  kubectl patch hpa vllm-inference-hpa -n inference-server --context worker-central1 --type=merge -p '{"spec":{"minReplicas":4,"maxReplicas":4}}' 2>/dev/null
 
   # Scale to 4 (handles both scale-down from >4 and scale-up from <4)
   echo "--- Ensuring 4 inference replicas ---"
   kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --context worker-east1 --replicas=4
-  kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --context worker-west3 --replicas=4
+  kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --context worker-central1 --replicas=4
 
   # Clean broken pods and stale workloads (without touching healthy Running pods)
   echo "--- Cleaning broken pods ---"
-  for ctx in worker-east1 worker-west3; do
+  for ctx in worker-east1 worker-central1; do
     # Count broken pods
     broken=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct --no-headers 2>/dev/null | grep -cEv "Running|Terminating" || true)
     if [ "$broken" -gt 0 ]; then
@@ -162,7 +162,7 @@ reset_loadtest() {
   # Wait for rollout
   echo "--- Waiting for inference pods to be ready ---"
   kubectl rollout status deployment/vllm-llama3-8b-instruct -n inference-server --context worker-east1 --timeout=300s &
-  kubectl rollout status deployment/vllm-llama3-8b-instruct -n inference-server --context worker-west3 --timeout=300s &
+  kubectl rollout status deployment/vllm-llama3-8b-instruct -n inference-server --context worker-central1 --timeout=300s &
   wait
 
   # Restore HPAs: target pinned at 4, spillover scales to 6
@@ -185,17 +185,17 @@ reset_multikueue() {
   echo "--- Clearing training jobs ---"
   kubectl delete jobset --all -n training-jobs --context mgmt --ignore-not-found 2>/dev/null
   kubectl delete jobset --all -n training-jobs --context worker-east1 --ignore-not-found 2>/dev/null
-  kubectl delete jobset --all -n training-jobs --context worker-west3 --ignore-not-found 2>/dev/null
+  kubectl delete jobset --all -n training-jobs --context worker-central1 --ignore-not-found 2>/dev/null
 
   # Force-delete training pods to speed up cleanup
   echo "--- Force-deleting training pods ---"
-  for ctx in worker-east1 worker-west3; do
+  for ctx in worker-east1 worker-central1; do
     kubectl delete pods --all -n training-jobs --context $ctx --grace-period=0 --force --ignore-not-found 2>/dev/null
   done
 
   # Wait until training pods are actually gone
   echo "--- Waiting for training pod cleanup ---"
-  for ctx in worker-east1 worker-west3; do
+  for ctx in worker-east1 worker-central1; do
     for i in $(seq 1 30); do
       count=$(kubectl get pods -n training-jobs --context $ctx --no-headers 2>/dev/null | wc -l)
       [ "$count" -eq 0 ] && break
@@ -204,13 +204,13 @@ reset_multikueue() {
   done
 
   # Clean up any finished workloads on workers
-  for ctx in worker-east1 worker-west3; do
+  for ctx in worker-east1 worker-central1; do
     kubectl delete workloads --all -n training-jobs --context $ctx --ignore-not-found 2>/dev/null
   done
 
   # Ensure ClusterQueue quotas are restored (may have been zeroed by demo-multikueue.sh)
   echo "--- Restoring ClusterQueue quotas ---"
-  for ctx in worker-east1 worker-west3; do
+  for ctx in worker-east1 worker-central1; do
     kubectl patch clusterqueue gpu-cluster-queue --context $ctx --type=merge \
       -p '{"spec":{"resourceGroups":[{"coveredResources":["nvidia.com/gpu"],"flavors":[{"name":"rtx-pro-6000","resources":[{"name":"nvidia.com/gpu","nominalQuota":8}]}]}]}}' 2>/dev/null || true
   done
@@ -225,8 +225,8 @@ validate_environment() {
   # Returns 0 if ready, 1 if not. Prints per-cluster status.
   local all_ok=true
 
-  for ctx in worker-east1 worker-west3; do
-    local label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+  for ctx in worker-east1 worker-central1; do
+    local label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "central1")
     local errors=""
 
     # ── Node health ──────────────────────────────────────────────
@@ -305,9 +305,9 @@ show_state() {
       echo "  ✗ Environment NOT ready after $((VALIDATION_RETRIES * VALIDATION_INTERVAL))s. Aborting."
       echo "    Debug:"
       echo "      kubectl get pods -n inference-server --context worker-east1"
-      echo "      kubectl get pods -n inference-server --context worker-west3"
+      echo "      kubectl get pods -n inference-server --context worker-central1"
       echo "      kubectl get nodes --context worker-east1 -o wide"
-      echo "      kubectl get nodes --context worker-west3 -o wide"
+      echo "      kubectl get nodes --context worker-central1 -o wide"
       exit 1
     fi
 
@@ -318,15 +318,15 @@ show_state() {
 
   echo ""
   echo "=== Current State (target: $TARGET) ==="
-  for ctx in worker-east1 worker-west3; do
-    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+  for ctx in worker-east1 worker-central1; do
+    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "central1")
     inf=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
     train=$(kubectl get pods -n training-jobs --context $ctx --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
     hpa_max=$(kubectl get hpa vllm-inference-hpa -n inference-server --context $ctx -o jsonpath='{.spec.maxReplicas}' 2>/dev/null)
     echo "  $label: ${inf} inference + ${train} training = $((inf + train))/8 GPUs  (HPA max: $hpa_max)"
   done
   echo ""
-  SPILL=$([ "$TARGET" = "east1" ] && echo "west3" || echo "east1")
+  SPILL=$([ "$TARGET" = "east1" ] && echo "central1" || echo "east1")
   echo "Ready to run:"
   echo "  ./demo-multikueue.sh --target $TARGET             # MultiKueue demo"
   echo "  python3 load_test.py --target-cluster $TARGET --concurrency 1500 --max-tokens 512   # Load via ${TARGET} VIP"
@@ -351,7 +351,7 @@ case "$MODE" in
     show_state
     ;;
   *)
-    echo "Usage: $0 [--all | --multikueue | --loadtest] --target <east1|west3>"
+    echo "Usage: $0 [--all | --multikueue | --loadtest] --target <east1|central1>"
     exit 1
     ;;
 esac

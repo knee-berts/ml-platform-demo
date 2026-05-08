@@ -60,7 +60,7 @@ Balancer on the mgmt cluster, configured as:
 Gateway: cross-region-gateway
   Class: gke-l7-cross-regional-internal-managed-mc
   Listener: HTTP / port 80
-  Addresses: ephemeral-ipv4 in us-east1 and us-west3
+  Addresses: ephemeral-ipv4 in us-east1 and us-central1
 ```
 
 **HTTPRoute** `vllm-llama3-8b-instruct-default` matches all paths and forwards
@@ -96,7 +96,7 @@ GCLB evaluates the metric across all backends in each cluster:
 
 - **east1 avg KV < 60%**: All traffic routes to east1 (geographic affinity to
   the VIP).
-- **east1 avg KV >= 60%**: GCLB begins shifting new connections to west3. The
+- **east1 avg KV >= 60%**: GCLB begins shifting new connections to central1. The
   shift is proportional -- it doesn't flip 100% at once; it ramps based on
   relative utilization.
 
@@ -242,12 +242,12 @@ vLLM pod
   '-- vllm:kv_cache_usage_perc    --> EPP scrapes (Tier 2 scoring + saturation)
 
 EPP pod
-  |-- flow_control_queue_size     --> PodMonitoring --> HPA (scale-to-zero on west3)
+  |-- flow_control_queue_size     --> PodMonitoring --> HPA (scale-to-zero on central1)
   '-- flow_control_queue_duration --> observability
 
 HPA
   |-- vllm:kv_cache_usage_perc target 45%  --> scales vLLM pods 2-6
-  '-- flow_control_queue_size > 0          --> wakes west3 from zero (if configured)
+  '-- flow_control_queue_size > 0          --> wakes central1 from zero (if configured)
 ```
 
 When vLLM pods scale up, Kueue manages the GPU quota. If inference needs more
@@ -266,10 +266,10 @@ As request volume increases, the system responds at each layer:
 |-----------|--------------|
 | **0-45%** | All traffic to east1. EPP dispatches immediately. HPA holds at min replicas. |
 | **45-60%** | HPA scales east1 pods (2 -> 4 -> 6). Kueue may preempt training jobs for GPU headroom. EPP still dispatching immediately. |
-| **60-85%** | GCLB begins shifting traffic to west3. EPP still dispatching immediately on both clusters. |
+| **60-85%** | GCLB begins shifting traffic to central1. EPP still dispatching immediately on both clusters. |
 | **>90%** | EPP saturation detector trips. Flow control engages: prod requests (priority 100) dispatch first; batch requests (priority -10) queue. TPOT is protected at the cost of increased TTFT. |
 
-If west3 is configured with scale-to-zero (`minReplicas: 0`), the first
+If central1 is configured with scale-to-zero (`minReplicas: 0`), the first
 spillover request hits an EPP with no backends. The EPP holds the HTTP
 connection in memory, the HPA detects `flow_control_queue_size > 0` and scales
 from 0 -> 1, and the request is dispatched to the new pod once it passes its

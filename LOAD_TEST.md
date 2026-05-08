@@ -22,7 +22,7 @@ The script runs several concurrent threads, each responsible for a different asp
 │      → flow_control_queue_size, queue_duration, saturated        │
 │                                                                 │
 │  KueueCollector (thread)                                        │
-│  └── kubectl get workloads on worker-east1, worker-west3, mgmt  │
+│  └── kubectl get workloads on worker-east1, worker-central1, mgmt  │
 │      → detects preemption (Requeued=True), new inference pods   │
 │      → kubectl get hpa, training pods                           │
 │                                                                 │
@@ -92,7 +92,7 @@ These are stored in `EppState` (per-cluster `EppMetrics` dataclass) and rendered
 
 `KueueCollector` polls three kubectl contexts every ~5 seconds:
 
-- **Worker clusters** (`worker-east1`, `worker-west3`): Gets all Kueue workloads to populate the dashboard table and detect new inference pods
+- **Worker clusters** (`worker-east1`, `worker-central1`): Gets all Kueue workloads to populate the dashboard table and detect new inference pods
 - **Management cluster** (`mgmt`): Gets training workload conditions — specifically the `Requeued` flag, which is the stable signal for preemption (the `Evicted` flag is transient and unreliable to poll)
 
 Events detected:

@@ -3,8 +3,8 @@
 load_test.py — KV-Cache Spillover, Flow Control & Kueue Preemption Demo
 
 Saturates east1's KV cache past the 60% GCPBackendPolicy threshold,
-then watches live as the multi-cluster LB shifts traffic to west3.
-Also monitors Kueue workloads on west3 — shows training jobs being
+then watches live as the multi-cluster LB shifts traffic to central1.
+Also monitors Kueue workloads on central1 — shows training jobs being
 preempted as inference scales out to claim GPU capacity.
 
 Supports EPP flow control: sends x-gateway-inference-objective and
@@ -221,7 +221,7 @@ class KueueState:
 
 
 class KueueCollector(threading.Thread):
-    """Polls Kueue workloads, training pods, and HPA status on west3."""
+    """Polls Kueue workloads, training pods, and HPA status on central1."""
     def __init__(self, kueue_state: KueueState):
         super().__init__(daemon=True)
         self.state = kueue_state
@@ -1551,7 +1551,7 @@ class Dashboard:
                 t.append(
                     f"\n  [dim]Direct load fills east1 KV cache. "
                     f"Once east1 > {KV_THRESHOLD*100:.0f}%, GCP LB routes new VIP "
-                    f"traffic to west3 (metric propagation ~10–60 s)[/dim]"
+                    f"traffic to central1 (metric propagation ~10–60 s)[/dim]"
                 )
             else:
                 t.append(
@@ -1678,13 +1678,13 @@ def main():
                              "higher = longer in-flight time = more KV blocks held")
     parser.add_argument("--direct-ip",   default="",
                         help="Target this IP:port directly (e.g. east1 ClusterIP 34.118.238.239:8000) "
-                             "to fill east1 KV cache without LB distributing to west3. "
+                             "to fill east1 KV cache without LB distributing to central1. "
                              "Useful to demonstrate spillover: fill east1 directly, "
-                             "then new VIP traffic routes to west3.")
+                             "then new VIP traffic routes to central1.")
     parser.add_argument("--target-cluster", default="east1", choices=["east1", "central1"],
                         help="Which cluster to run the load generator in and target directly "
-                             "(default east1). Use west3 to validate Kueue preemption: "
-                             "fills west3 KV cache → HPA scales → preempts training jobs.")
+                             "(default east1). Use central1 to validate Kueue preemption: "
+                             "fills central1 KV cache → HPA scales → preempts training jobs.")
     parser.add_argument("--load-pods", type=int, default=4,
                         help="Number of load generator pods to spread concurrency across (default 4)")
     parser.add_argument("--objective", default="food-review-prod",

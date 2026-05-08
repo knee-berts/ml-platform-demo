@@ -11,7 +11,7 @@
 #
 # Usage:
 #   ./demo-multikueue.sh --target east1             # Interactive, load enters east1
-#   ./demo-multikueue.sh --target west3             # Interactive, load enters west3
+#   ./demo-multikueue.sh --target central1             # Interactive, load enters central1
 #   ./demo-multikueue.sh --target east1 --auto      # Automated with pauses
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
@@ -23,7 +23,7 @@ case "$TERM" in xterm-ghostty|*-unknown) export TERM=xterm-256color ;; esac
 
 # Safety trap: always restore ClusterQueue quotas on exit/interrupt
 trap 'kubectl patch clusterqueue gpu-cluster-queue --context worker-east1 --type=merge -p "{\"spec\":{\"resourceGroups\":[{\"coveredResources\":[\"nvidia.com/gpu\"],\"flavors\":[{\"name\":\"rtx-pro-6000\",\"resources\":[{\"name\":\"nvidia.com/gpu\",\"nominalQuota\":8}]}]}]}}" 2>/dev/null
-kubectl patch clusterqueue gpu-cluster-queue --context worker-west3 --type=merge -p "{\"spec\":{\"resourceGroups\":[{\"coveredResources\":[\"nvidia.com/gpu\"],\"flavors\":[{\"name\":\"rtx-pro-6000\",\"resources\":[{\"name\":\"nvidia.com/gpu\",\"nominalQuota\":8}]}]}]}}" 2>/dev/null' EXIT INT TERM
+kubectl patch clusterqueue gpu-cluster-queue --context worker-central1 --type=merge -p "{\"spec\":{\"resourceGroups\":[{\"coveredResources\":[\"nvidia.com/gpu\"],\"flavors\":[{\"name\":\"rtx-pro-6000\",\"resources\":[{\"name\":\"nvidia.com/gpu\",\"nominalQuota\":8}]}]}]}}" 2>/dev/null' EXIT INT TERM
 
 AUTO=false
 TARGET=""
@@ -35,7 +35,7 @@ for arg in "$@"; do
     --load) RUN_LOAD=true ;;
     --target) :;; # next arg is the value
     east1|--target=east1) TARGET="east1" ;;
-    west3|--target=west3) TARGET="west3" ;;
+    central1|--target=central1) TARGET="central1" ;;
   esac
 done
 
@@ -48,10 +48,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$TARGET" ]; then
-  echo "Usage: $0 --target <east1|west3> [--auto] [--load]"
+  echo "Usage: $0 --target <east1|central1> [--auto] [--load]"
   echo ""
-  echo "  --target east1   Load enters east1 VIP; 2 jobs on east1, 1 on west3"
-  echo "  --target west3   Load enters west3 VIP; 2 jobs on west3, 1 on east1"
+  echo "  --target east1   Load enters east1 VIP; 2 jobs on east1, 1 on central1"
+  echo "  --target central1   Load enters central1 VIP; 2 jobs on central1, 1 on east1"
   echo "  --auto           Automated mode with pauses (for recording)"
   echo "  --load           After scheduling jobs, start the load test (load mode, no dashboard)"
   exit 1
@@ -61,12 +61,12 @@ if [ "$TARGET" = "east1" ]; then
   TARGET_CTX="worker-east1"
   TARGET_LABEL="east1"
   TARGET_COLOR='\033[0;31m'
-  OTHER_CTX="worker-west3"
-  OTHER_LABEL="west3"
+  OTHER_CTX="worker-central1"
+  OTHER_LABEL="central1"
   OTHER_COLOR='\033[0;36m'
 else
-  TARGET_CTX="worker-west3"
-  TARGET_LABEL="west3"
+  TARGET_CTX="worker-central1"
+  TARGET_LABEL="central1"
   TARGET_COLOR='\033[0;36m'
   OTHER_CTX="worker-east1"
   OTHER_LABEL="east1"
@@ -119,8 +119,8 @@ narrate() {
 }
 
 show_gpu_state() {
-  for ctx in worker-east1 worker-west3; do
-    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+  for ctx in worker-east1 worker-central1; do
+    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "central1")
     inf=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
     train=$(kubectl get pods -n training-jobs --context $ctx --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
     free=$((8 - inf - train))
@@ -147,8 +147,8 @@ show_mgmt_workloads() {
 }
 
 show_worker_training() {
-  for ctx in worker-east1 worker-west3; do
-    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+  for ctx in worker-east1 worker-central1; do
+    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "central1")
     pods=$(kubectl get pods -n training-jobs --context $ctx --field-selector=status.phase=Running --no-headers 2>/dev/null || true)
     count=$(echo "$pods" | grep -c "Running" || true)
     if [ "$count" -gt 0 ]; then
@@ -172,10 +172,10 @@ submit_job() {
 wait_for_job() {
   local job_name=$1
   for i in $(seq 1 30); do
-    for ctx in worker-east1 worker-west3; do
+    for ctx in worker-east1 worker-central1; do
       count=$(kubectl get pods -n training-jobs --context $ctx -l "jobset.sigs.k8s.io/jobset-name=$job_name" --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
       if [ "$count" -ge 2 ]; then
-        label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+        label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "central1")
         color=$([ "$ctx" = "worker-east1" ] && echo "$RED" || echo "$CYAN")
         echo -e "  ${GREEN}✓${NC} ${MAGENTA}$job_name${NC} → dispatched to ${color}${BOLD}$label${NC} (2 GPUs)"
         return 0
@@ -200,7 +200,7 @@ echo -e "  Training jobs are submitted to the ${BOLD}management cluster${NC}."
 echo -e "  MultiKueue evaluates GPU capacity across all worker clusters"
 echo -e "  and dispatches each job to a cluster with available resources."
 echo ""
-echo -e "  ${DIM}Clusters: us-east1 (8 GPUs) + us-west3 (8 GPUs) = 16 GPUs total${NC}"
+echo -e "  ${DIM}Clusters: us-east1 (8 GPUs) + us-central1 (8 GPUs) = 16 GPUs total${NC}"
 echo -e "  ${DIM}Each cluster runs 4 inference pods (4 GPUs) → 4 GPUs free each${NC}"
 echo ""
 echo -e "  Load enters: ${TARGET_COLOR}${BOLD}${TARGET_LABEL}${NC} VIP ($VIP)"
