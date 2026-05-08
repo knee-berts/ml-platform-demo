@@ -21,10 +21,19 @@ resource "google_service_account" "pod_snapshot" {
   depends_on = [google_project_service.default]
 }
 
-# Inference SA → model-weights bucket (read).
+# Inference SA → model-weights bucket. Two grants:
+# - objectViewer:    read object data (the actual model files)
+# - legacyBucketReader: bucket-metadata get. vLLM's runai_streamer calls
+#   bucket.reload() during model load, which hits GET /b/<name>?projection=noAcl
+#   and that needs storage.buckets.get — not granted by objectViewer/objectUser.
 resource "google_storage_bucket_iam_member" "inference_reads_model_weights" {
+  for_each = toset([
+    "roles/storage.objectViewer",
+    "roles/storage.legacyBucketReader",
+  ])
+
   bucket = google_storage_bucket.model_weights.name
-  role   = "roles/storage.objectViewer"
+  role   = each.value
   member = "serviceAccount:${google_service_account.inference.email}"
 }
 

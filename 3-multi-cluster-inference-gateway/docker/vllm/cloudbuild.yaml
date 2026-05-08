@@ -1,0 +1,36 @@
+# Cloud Build for the vLLM image. Builds the repo's Dockerfile (at the repo
+# root) and pushes to the user's vllm-blackwell AR repo (created by the
+# 1-infrastructure stack).
+#
+# Run from the repo root:
+#   gcloud builds submit . \
+#     --config 3-multi-cluster-inference-gateway/docker/vllm/cloudbuild.yaml \
+#     --project=<your-project>
+#
+# The Dockerfile FROMs vllm/vllm-openai which is multi-arch (sm_75-sm_120),
+# so the resulting image runs on both Blackwell (sm_120) and Ada Lovelace L4
+# (sm_89). FlashInfer cu128/torch2.7 wheels also include sm_89.
+substitutions:
+  _TAG: latest
+  _VLLM_TAG: latest
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - VLLM_TAG=${_VLLM_TAG}
+      - -t
+      - us-east1-docker.pkg.dev/${PROJECT_ID}/vllm-blackwell/vllm-blackwell:${_TAG}
+      - -f
+      - Dockerfile
+      - .
+
+images:
+  - us-east1-docker.pkg.dev/${PROJECT_ID}/vllm-blackwell/vllm-blackwell:${_TAG}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  # vLLM image is large (~10 GB), bump the disk to keep build fast.
+  diskSizeGb: 100
+  machineType: E2_HIGHCPU_8

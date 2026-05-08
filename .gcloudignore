@@ -1,0 +1,41 @@
+# Keep Cloud Build source uploads tiny. The vLLM Dockerfile only FROMs
+# vllm/vllm-openai and pip-installs FlashInfer — no local files are COPYd
+# into the image, so we can ignore most of the repo.
+
+# Terraform local state and provider caches (huge).
+**/.terraform/
+**/.terraform.lock.hcl
+**/terraform.tfstate
+**/terraform.tfstate.*
+**/tfplan
+**/apply.log
+
+# Recordings, gifs, asciinema casts.
+recordings/
+*.cast
+*.gif
+
+# Internal docs and findings.
+ENGINEERING_REPORT.md
+FINDINGS.md
+CUSTOM_METRICS_TROUBLESHOOTING.md
+INFERENCE_FLOW.md
+LOAD_TEST.md
+talk/
+
+# Local Python state.
+__pycache__/
+*.pyc
+
+# Editor / Claude Code metadata.
+.claude/
+CLAUDE.md
+.vscode/
+
+# Git internals are excluded by default but be explicit.
+.git/
+.gitignore
+.gitattributes
+
+# Per-stack node_modules etc.
+**/node_modules/

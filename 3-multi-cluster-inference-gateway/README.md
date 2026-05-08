@@ -21,17 +21,13 @@ pattern using the modern (v3) Helm provider.
   `workers/baseline-load.yaml` if you want the warm-up generator) with `kubectl`.
 - Any Kueue resources. Those live in the `2-multikueue` stack.
 
-## HPA profiles
+## HPA ownership
 
-Each worker gets one of two HPA profiles, controlled by
-`scale_from_zero_worker_indexes`:
-
-- **Baseline** (default for the first worker) — `min=2`, `max=6`, KV-cache target 0.45. Mirrors `kueue/hpa-inference.yaml`.
-- **Scale-from-zero spillover** (default for the second worker) — `min=0`, `max=6`, EPP flow-control queue depth as the wake-up signal + KV-cache for scale-up. Mirrors `kueue/hpa-inference-west3.yaml`.
-
-The demo's `demo-reset.sh` patches min/max at runtime depending on which
-cluster is the load target — that's expected and the chart doesn't fight it
-(neither min nor max is locked).
+The HPA is **not** part of this chart. `demo-preemption.sh`'s pre-flight applies
+`kueue/hpa-inference.yaml` (`min=2`, `max=6`, KV-cache target 0.45) when the
+demo starts; cleanup deletes the HPA so the inference Deployment falls back
+to its chart default of `replicas: 0` and the GPU pool drains. Install ends
+with the data plane staged but idle — no GPUs in use until the demo runs.
 
 ## Prerequisites
 

@@ -185,7 +185,7 @@ resource "google_container_cluster" "workers" {
 # gpu_node_min_count when no GPU workloads are scheduled, supporting the
 # between-demo scale-to-zero pattern in demo-preemption.sh::delete_inference_stack.
 resource "google_container_node_pool" "rtx_pro_6000" {
-  for_each = google_container_cluster.workers
+  for_each = var.enable_blackwell_pool ? google_container_cluster.workers : {}
 
   name     = "${each.value.name}-rtx-pro-6000-pool"
   project  = var.project_id
@@ -208,8 +208,9 @@ resource "google_container_node_pool" "rtx_pro_6000" {
     service_account = google_service_account.clusters["worker"].email
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
     disk_size_gb    = var.gpu_node_disk_size_gb
-    disk_type       = "pd-balanced"
-    image_type      = "COS_CONTAINERD"
+    # g4 (Blackwell) only supports hyperdisk; non-g4 GPU machines use pd-balanced.
+    disk_type  = startswith(var.gpu_machine_type, "g4-") ? "hyperdisk-balanced" : "pd-balanced"
+    image_type = "COS_CONTAINERD"
 
     guest_accelerator {
       type  = "nvidia-rtx-pro-6000"

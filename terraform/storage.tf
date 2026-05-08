@@ -11,7 +11,7 @@ resource "google_storage_bucket" "model_weights" {
   project                     = var.project_id
   location                    = var.model_weights_location
   uniform_bucket_level_access = true
-  force_destroy               = false
+  force_destroy               = true
 
   versioning {
     enabled = false
@@ -30,7 +30,7 @@ resource "google_storage_bucket" "pod_snapshots" {
   project                     = var.project_id
   location                    = upper(each.value)
   uniform_bucket_level_access = true
-  force_destroy               = false
+  force_destroy               = true
 
   depends_on = [google_project_service.default]
 }

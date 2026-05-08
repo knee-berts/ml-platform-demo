@@ -51,6 +51,22 @@ variable "dispatcher_image" {
   default     = "us-east1-docker.pkg.dev/kubecon-fleets-demo-1/vllm-blackwell/least-disruption-dispatcher:latest"
 }
 
+variable "enable_dispatcher" {
+  description = "Whether to install the least-disruption-dispatcher Deployment. Default true. The dispatcher reads worker connection details from the kubernetes_secret.worker_kubeconfig resources in this stack and authenticates via Workload Identity (terraform/iam.tf::least_disruption_dispatcher), so all prereqs are wired automatically. Set false to fall back to Kueue's built-in AllAtOnce dispatcher."
+  type        = bool
+  default     = true
+}
+
+variable "dispatcher_cluster_priorities" {
+  description = "Map of worker shortname (e.g. \"worker-east1\") to the dispatcher.kueue.x-k8s.io/priority label value applied to that cluster's MultiKueueCluster. Higher = preferred when eviction scores tie. Defaults: east1=100 (primary), central1=50 (spillover). Add entries for any other regions you put in worker_regions."
+  type        = map(number)
+  default = {
+    "worker-east1"    = 100
+    "worker-central1" = 50
+    "worker-west3"    = 50
+  }
+}
+
 variable "gcp_auth_plugin_image" {
   description = "Full image reference for the gcp-auth-plugin source image. Used as the init container in the dispatcher and (logically) baked into the derived Kueue image."
   type        = string
@@ -64,11 +80,9 @@ variable "gpu_resource_flavor_name" {
 }
 
 variable "gpu_node_label" {
-  description = "Node label key/value the ResourceFlavor selects on. Must match the GPU node pool's nodeSelector. Set to {} to match any node."
+  description = "Node label key/value the ResourceFlavor selects on. Default {} (no node-label match) because the inference-gpu ComputeClass handles GPU node placement; an additional cloud.google.com/gke-accelerator nodeSelector would be injected into admitted pods and rejected by GKE Warden's ccc-node-affinity-selector-limitation policy. Override only when running on a hand-managed Blackwell pool that the ComputeClass doesn't cover."
   type        = map(string)
-  default = {
-    "cloud.google.com/gke-accelerator" = "nvidia-rtx-pro-6000"
-  }
+  default     = {}
 }
 
 variable "infra_state_path" {

@@ -1,0 +1,42 @@
+# Cloud Build for the gcp-auth-plugin image. Source is the public
+# GoogleCloudPlatform/gke-fleet-management repo (Apache 2.0). Clones at
+# build time, builds the binary, pushes to the user's AR repo (created by
+# the 1-infrastructure stack).
+#
+# Run from the repo root:
+#   gcloud builds submit --no-source \
+#     --config 2-multikueue/docker/gcp-auth-plugin/cloudbuild.yaml \
+#     --project=<your-project>
+#
+# Then point terraform.tfvars at the resulting image:
+#   gcp_auth_plugin_image = "us-east1-docker.pkg.dev/<project>/gcp-auth-plugin/gcp-auth-plugin:v0.0.1"
+substitutions:
+  _UPSTREAM_REPO: "https://github.com/GoogleCloudPlatform/gke-fleet-management"
+  _UPSTREAM_REF: main
+  _TAG: v0.0.1
+  _LOCATION: us-east1
+
+steps:
+  - name: gcr.io/cloud-builders/git
+    args:
+      - clone
+      - --depth=1
+      - --branch=${_UPSTREAM_REF}
+      - ${_UPSTREAM_REPO}
+      - upstream
+
+  - name: gcr.io/cloud-builders/docker
+    dir: upstream/gcp-auth-plugin
+    args:
+      - build
+      - -t
+      - ${_LOCATION}-docker.pkg.dev/${PROJECT_ID}/gcp-auth-plugin/gcp-auth-plugin:${_TAG}
+      - -f
+      - Dockerfile
+      - .
+
+images:
+  - ${_LOCATION}-docker.pkg.dev/${PROJECT_ID}/gcp-auth-plugin/gcp-auth-plugin:${_TAG}
+
+options:
+  logging: CLOUD_LOGGING_ONLY

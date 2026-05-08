@@ -1,3 +1,14 @@
+# Both demo namespaces. inference-server hosts the LocalQueue that backs the
+# vLLM Deployment + EPP (3-mcig stack creates the rest of that namespace's
+# resources). training-jobs hosts the LocalQueue that demo-multikueue.sh's
+# JobSets target.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.inferenceServerNamespace }}
+  labels:
+    shared-gateway-access: "true"
+---
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -1,0 +1,5 @@
+apiVersion: v2
+name: inference-application
+description: vLLM Deployment + LoRA syncer sidecar + Service + ConfigMap + hf-token Secret. The application data plane that the multi-cluster gateway routes traffic to.
+version: 0.1.0
+type: application

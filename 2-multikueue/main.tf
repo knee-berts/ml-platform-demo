@@ -109,6 +109,15 @@ provider "helm" {
   }
 }
 
+# Hub kubernetes provider — used to write the worker-<short>-kubeconfig
+# Secrets that the least-disruption-dispatcher reads at startup
+# (dispatcher/pkg/cluster/client.go::buildRestConfigFromSecret).
+provider "kubernetes" {
+  host                   = "https://${local.hub.endpoint}"
+  token                  = data.google_client_config.default.access_token
+  cluster_ca_certificate = base64decode(local.hub.ca_cert)
+}
+
 # ─── JobSet (all clusters) ──────────────────────────────────────────────────
 # Required for training-jobset.yaml. Kueue's JobSet integration depends on
 # the JobSet CRD existing.
@@ -320,6 +329,9 @@ resource "helm_release" "multikueue_control_plane" {
         displayName = c.name
         # Stable shortname used for the standalone ClusterProfile name (mirrors `worker-west3` in clusterprofile-west3.yaml)
         shortName = "worker-${replace(c.location, "us-", "")}"
+        # Tiebreaker priority for the least-disruption-dispatcher. Falls back
+        # to var.dispatcher_cluster_priorities[shortName] when set, else 0.
+        dispatcherPriority = lookup(var.dispatcher_cluster_priorities, "worker-${replace(c.location, "us-", "")}", 0)
       }
     ]
   })]
@@ -327,9 +339,68 @@ resource "helm_release" "multikueue_control_plane" {
   depends_on = [helm_release.kueue_config_hub]
 }
 
+# ─── Worker kubeconfig Secrets (hub only) ───────────────────────────────────
+# The least-disruption-dispatcher resolves worker connections by reading
+# Secrets named worker-<short>-kubeconfig in kueue-system on the hub. The
+# kubeconfig points at the worker master directly with the gcp-auth-plugin
+# exec credential provider; the plugin mints a Google token from the
+# dispatcher pod's Workload Identity (see iam.tf::least_disruption_dispatcher
+# in the foundation stack for the IAM bindings that authorize those tokens).
+
+resource "kubernetes_secret_v1" "worker_kubeconfig" {
+  for_each = {
+    for c in local.workers :
+    "worker-${replace(c.location, "us-", "")}" => c
+  }
+
+  metadata {
+    name      = "${each.key}-kubeconfig"
+    namespace = "kueue-system"
+  }
+
+  type = "Opaque"
+
+  data = {
+    kubeconfig = yamlencode({
+      apiVersion      = "v1"
+      kind            = "Config"
+      current-context = each.key
+      clusters = [{
+        name = each.key
+        cluster = {
+          server                     = "https://${each.value.endpoint}"
+          certificate-authority-data = each.value.ca_cert
+        }
+      }]
+      contexts = [{
+        name = each.key
+        context = {
+          cluster = each.key
+          user    = "google"
+        }
+      }]
+      users = [{
+        name = "google"
+        user = {
+          exec = {
+            apiVersion         = "client.authentication.k8s.io/v1beta1"
+            command            = "/plugins/gcp-auth-plugin"
+            interactiveMode    = "Never"
+            provideClusterInfo = true
+          }
+        }
+      }]
+    })
+  }
+
+  depends_on = [helm_release.kueue_hub]
+}
+
 # ─── least-disruption-dispatcher (hub only) ─────────────────────────────────
 
 resource "helm_release" "dispatcher" {
+  count = var.enable_dispatcher ? 1 : 0
+
   name             = "least-disruption-dispatcher"
   namespace        = "kueue-system"
   create_namespace = false
@@ -342,5 +413,8 @@ resource "helm_release" "dispatcher" {
     clusterQueueName   = "gpu-cluster-queue"
   })]
 
-  depends_on = [helm_release.multikueue_control_plane]
+  depends_on = [
+    helm_release.multikueue_control_plane,
+    kubernetes_secret_v1.worker_kubeconfig,
+  ]
 }

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.inferencePoolName }}-adapters
+  namespace: {{ .Values.inferenceNamespace }}
+data:
+  configmap.yaml: |
+    vLLMLoRAConfig:
+      name: {{ .Values.inferencePoolName }}-adapters
+      port: 8000
+      defaultBaseModel: {{ .Values.servedModelName | quote }}
+      ensureExist:
+        models:
+        {{- range .Values.loraAdapters }}
+        - id: {{ .id | quote }}
+          source: {{ .source | quote }}
+        {{- end }}

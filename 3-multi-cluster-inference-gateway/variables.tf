@@ -69,8 +69,66 @@ variable "compute_class_name" {
   default     = "inference-gpu"
 }
 
-variable "scale_from_zero_worker_indexes" {
-  description = "Indexes (into the worker_clusters output) that should get the scale-from-zero HPA profile. Other workers get the baseline HPA. Defaults to [1] which gives the second worker (us-west3 by default) the spillover behavior described in kueue/hpa-inference-west3.yaml."
-  type        = list(number)
-  default     = [1]
+variable "enable_blackwell_compute_class_tier" {
+  description = "Add a Blackwell (RTX PRO 6000) tier to the ComputeClass priority list. Default false — the demo runs on L4. Enable only if your project has Blackwell quota; align with terraform/variables.tf::enable_blackwell_pool."
+  type        = bool
+  default     = false
+}
+
+variable "enable_pod_snapshot" {
+  description = "Whether to install GKE Pod Snapshot resources (PodSnapshotPolicy + PodSnapshotStorageConfig + KSA). Set false on clusters where the podsnapshot.gke.io CRDs aren't installed."
+  type        = bool
+  default     = true
+}
+
+variable "vllm_image" {
+  description = "vLLM container image. Built by 3-mcig/docker/vllm/cloudbuild.yaml; install.sh sets this to us-east1-docker.pkg.dev/<project>/vllm-blackwell/vllm-blackwell:latest."
+  type        = string
+}
+
+variable "model_weights_path" {
+  description = "Path to Llama 3.1 8B Instruct weights. Default points at the model-weights bucket created by the 1-infrastructure stack and populated by the weights-uploader Cloud Build."
+  type        = string
+}
+
+variable "served_model_name" {
+  description = "Logical model name vLLM serves the weights as. Should match the HuggingFace repo id for compatibility with HuggingFace clients."
+  type        = string
+  default     = "meta-llama/Llama-3.1-8B-Instruct"
+}
+
+variable "hf_token" {
+  description = "HuggingFace API token with access to the gated meta-llama/Llama-3.1-8B-Instruct repo. Pass via TF_VAR_hf_token env var; do NOT commit a literal value to a tfvars file."
+  type        = string
+  sensitive   = true
+}
+
+variable "vllm_runtime_class_name" {
+  description = "RuntimeClass for the vLLM Deployment (e.g. \"gvisor\"). Empty = no runtimeClass. NAP-created nodes don't have gvisor pre-installed."
+  type        = string
+  default     = ""
+}
+
+variable "vllm_max_num_seq" {
+  description = "vLLM --max-num-seq. Default 16 fits Llama 3.1 8B bf16 + fp8 KV cache on L4 (24GB). Bump to 256+ on Blackwell."
+  type        = number
+  default     = 16
+}
+
+variable "vllm_max_model_len" {
+  description = "vLLM --max-model-len. Caps context window to bound KV cache size. 2048 is the largest that fits with Llama 3.1 8B + fp8 KV on L4."
+  type        = number
+  default     = 2048
+}
+
+variable "vllm_gpu_memory_utilization" {
+  description = "vLLM --gpu-memory-utilization. 0.95 on L4 because Llama 3.1 8B leaves <2 GiB for KV at the default 0.9. Drop back to 0.9 if you see OOMs from the framework's residual allocations."
+  type        = number
+  default     = 0.95
+}
+
+variable "vllm_kv_cache_dtype" {
+  description = "vLLM --kv-cache-dtype. Default fp8 halves KV memory (and is required to fit Llama 3.1 8B on L4). Set to \"\" to disable; safe to leave fp8 on Blackwell too."
+  type        = string
+  default     = "fp8"
 }

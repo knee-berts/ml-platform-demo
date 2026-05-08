@@ -88,3 +88,15 @@ variable "model_weights_location" {
   type        = string
   default     = "US"
 }
+
+variable "manage_project_services" {
+  description = "Whether Terraform manages the google_project_service resources for the demo's required APIs. Default true. Set to false ONLY when running with a cross-project SA that can't pass the provider's serviceusage LIST refresh check; you must then enable the APIs in apis.tf::local.required_services manually with `gcloud services enable`."
+  type        = bool
+  default     = true
+}
+
+variable "enable_blackwell_pool" {
+  description = "Whether to provision a Terraform-managed RTX PRO 6000 Blackwell node pool on each worker. Default false because Blackwell quota and zonal availability are scarce; the demo runs on NVIDIA L4 (Spot first, on-demand fallback) via the inference-gpu ComputeClass. Set true only if you have explicit Blackwell quota in the worker regions."
+  type        = bool
+  default     = false
+}

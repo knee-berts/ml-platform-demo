@@ -1,3 +1,4 @@
+{{- if .Values.enablePodSnapshot }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -31,3 +32,4 @@ spec:
   triggerConfig:
     type: manual
     postCheckpoint: resume
+{{- end }}

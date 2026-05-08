@@ -182,47 +182,40 @@ Dashboard-only mode is useful when you want to show the live monitoring UI while
 
 The infrastructure spans three GKE clusters in project `kubecon-fleets-demo-1`.
 
-### Infrastructure as Code (Terraform)
+### Quick install (one command)
 
-The whole demo provisions in three layered Terraform stacks. Apply in order;
-each stack reads the previous via `terraform_remote_state` (default local
-backend — switch to GCS for shared state).
+`scripts/install.sh` provisions the full demo in any GCP project:
+
+```bash
+export PROJECT_ID=your-gcp-project
+export HF_TOKEN=hf_xxx     # https://huggingface.co/settings/tokens
+./scripts/install.sh
+```
+
+The script:
+
+1. Enables required APIs.
+2. `terraform apply` for [`terraform/`](terraform/) — clusters, fleet, IAM, AR repos, GCS buckets.
+3. Cloud-Builds and pushes 4 images to the project's Artifact Registry: `gcp-auth-plugin` (cloned from public source), `kueue-with-gcp-auth`, `least-disruption-dispatcher`, `vllm-blackwell`.
+4. Cloud-Build job downloads Llama 3.1 8B from HuggingFace using `HF_TOKEN` and uploads to `gs://<project>-model-weights/`.
+5. `terraform apply` for [`2-multikueue/`](2-multikueue/) — Kueue + JobSet + LWS + dispatcher across all clusters.
+6. `terraform apply` for [`3-multi-cluster-inference-gateway/`](3-multi-cluster-inference-gateway/) — cross-region Gateway + EPP + InferencePool + vLLM Deployment + HF Secret.
+7. Renames kubectl contexts to `mgmt` / `worker-east1` / `worker-west3`.
+8. Runs `demo-preemption.sh` (skip with `SKIP_DEMO=1`).
+
+Wall-clock: ~30–45 min, dominated by GKE cluster creation, vLLM image push, and weights download.
+
+**Requirements:** Owner role on the project, NVIDIA L4 quota in the worker regions (default `us-east1` + `us-west3` — 8 GPUs per region is enough for a full demo run), and a HuggingFace token that has accepted the [Llama 3.1 license](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct).
+
+### Layered Terraform stacks
+
+The script wraps three Terraform stacks. Each is also runnable standalone — see each stack's `README.md`.
 
 | Stack | What it provisions |
 |---|---|
-| [`terraform/`](terraform/) | GCP infrastructure: project services, proxy subnets, cluster SAs + IAM, Workload Identity bindings, multi-cluster ingress feature, the management + worker GKE clusters with NAP, the Blackwell GPU pool, GCS buckets (model-weights, pod-snapshots), and Artifact Registry repos (`vllm-blackwell`, `gcp-auth-plugin`). |
-| [`2-multikueue/`](2-multikueue/) | In-cluster Kueue + MultiKueue control plane via the Helm provider: Kueue, JobSet, LeaderWorkerSet operators on every cluster; demo's WorkloadPriorityClasses, ResourceFlavor, ClusterQueue, LocalQueues; AdmissionCheck, MultiKueueConfig, MultiKueueClusters, ClusterProfiles on the hub; the `least-disruption-dispatcher` Deployment. |
-| [`3-multi-cluster-inference-gateway/`](3-multi-cluster-inference-gateway/) | In-cluster routing infrastructure via Helm: cross-region Gateway, HTTPRoute + GCPBackendPolicy + HealthCheckPolicy on the hub; per-worker InferencePool, InferenceObjectives, EPP, ComputeClass, AutoscalingMetric, HPA, and pod-snapshot config. |
-
-```bash
-# 1. GCP-side infra
-cd terraform
-cp terraform.tfvars.example terraform.tfvars
-terraform init && terraform apply
-
-# 2. Kueue + MultiKueue (build the Kueue+gcp-auth-plugin image first — see 2-multikueue/README.md)
-cd ../2-multikueue
-cp terraform.tfvars.example terraform.tfvars
-terraform init && terraform apply
-
-# 3. Multi-cluster gateway + inference routing
-cd ../3-multi-cluster-inference-gateway
-cp terraform.tfvars.example terraform.tfvars
-terraform init && terraform apply
-```
-
-After all three stacks apply, deploy the application data plane (vLLM
-Deployment + HF token Secret) with `kubectl`:
-
-```bash
-kubectl apply -f workers/secret.yaml --context worker-east1
-kubectl apply -f workers/gpu-deployment.yaml --context worker-east1
-# repeat for worker-west3
-```
-
-See each stack's `README.md` for resource-by-resource detail and
-prerequisites (quotas, build steps for the derived Kueue image and the
-dispatcher image, etc.).
+| [`terraform/`](terraform/) | GCP infrastructure: project services, proxy subnets, cluster SAs + IAM, Workload Identity bindings, multi-cluster ingress feature, the management + worker GKE clusters with NAP, GCS buckets (`model-weights`, `pod-snapshots`), and Artifact Registry repos (`vllm-blackwell`, `gcp-auth-plugin`). The Blackwell node pool is opt-in (`enable_blackwell_pool=true`); default is L4 via NAP. |
+| [`2-multikueue/`](2-multikueue/) | In-cluster Kueue + MultiKueue control plane via the Helm provider: Kueue, JobSet, LeaderWorkerSet operators on every cluster; demo's WorkloadPriorityClasses, ResourceFlavor, ClusterQueue, LocalQueues; AdmissionCheck, MultiKueueConfig, MultiKueueClusters, ClusterProfiles on the hub; `least-disruption-dispatcher` Deployment (opt-in). |
+| [`3-multi-cluster-inference-gateway/`](3-multi-cluster-inference-gateway/) | In-cluster routing + application via Helm: cross-region Gateway, HTTPRoute + GCPBackendPolicy + HealthCheckPolicy on the hub; per-worker InferencePool, InferenceObjectives, EPP, ComputeClass (L4 spot → L4 on-demand by default), AutoscalingMetric, HPA, and the vLLM Deployment + HF token Secret. |
 
 ### Clusters
 

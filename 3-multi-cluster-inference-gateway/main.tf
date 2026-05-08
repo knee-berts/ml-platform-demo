@@ -28,8 +28,6 @@ locals {
       value = r
     }
   ]
-
-  scale_from_zero_set = toset([for i in var.scale_from_zero_worker_indexes : tostring(i)])
 }
 
 # ─── Helm providers ─────────────────────────────────────────────────────────
@@ -138,7 +136,9 @@ resource "helm_release" "mgmt_routing" {
 # ─── Worker-side inference data plane ───────────────────────────────────────
 # One release per worker, each carrying: namespace, ComputeClass, InferencePool,
 # InferenceObjectives, EPP (Deployment + RBAC + ConfigMap + Service + monitoring),
-# AutoscalingMetric, HPA, and pod-snapshot config.
+# AutoscalingMetric, and pod-snapshot config. The HPA itself is owned by
+# demo-preemption.sh (kueue/hpa-inference.yaml) so install leaves the data
+# plane idle — pods only come up when the demo runs.
 
 resource "helm_release" "inference_routing_worker0" {
   provider         = helm.worker0
@@ -151,10 +151,11 @@ resource "helm_release" "inference_routing_worker0" {
     inferencePoolName              = var.inference_pool_name
     inferenceNamespace             = var.inference_namespace
     computeClassName               = var.compute_class_name
+    blackwellEnabled               = var.enable_blackwell_compute_class_tier
     eppImage                       = var.epp_image
     saturationKvCacheUtilThreshold = var.saturation_kv_cache_util_threshold
     saturationQueueDepthThreshold  = var.saturation_queue_depth_threshold
-    enableScaleFromZero            = contains(local.scale_from_zero_set, "0")
+    enablePodSnapshot              = var.enable_pod_snapshot
     podSnapshotBucket              = data.terraform_remote_state.infra.outputs.pod_snapshot_buckets[local.workers[0].location]
     podSnapshotServiceAccount      = data.terraform_remote_state.infra.outputs.pod_snapshot_service_account
   })]
@@ -173,13 +174,66 @@ resource "helm_release" "inference_routing_worker1" {
     inferencePoolName              = var.inference_pool_name
     inferenceNamespace             = var.inference_namespace
     computeClassName               = var.compute_class_name
+    blackwellEnabled               = var.enable_blackwell_compute_class_tier
     eppImage                       = var.epp_image
     saturationKvCacheUtilThreshold = var.saturation_kv_cache_util_threshold
     saturationQueueDepthThreshold  = var.saturation_queue_depth_threshold
-    enableScaleFromZero            = contains(local.scale_from_zero_set, "1")
+    enablePodSnapshot              = var.enable_pod_snapshot
     podSnapshotBucket              = data.terraform_remote_state.infra.outputs.pod_snapshot_buckets[local.workers[1].location]
     podSnapshotServiceAccount      = data.terraform_remote_state.infra.outputs.pod_snapshot_service_account
   })]
 
   depends_on = [helm_release.inference_crds_worker1]
+}
+
+# ─── Inference application (vLLM Deployment + HF Secret + ConfigMap + Service) ──
+
+locals {
+  inference_application_values = {
+    inferencePoolName       = var.inference_pool_name
+    inferenceNamespace      = var.inference_namespace
+    computeClassName        = var.compute_class_name
+    image                   = var.vllm_image
+    modelWeightsPath        = var.model_weights_path
+    servedModelName         = var.served_model_name
+    hfToken                 = var.hf_token
+    runtimeClassName        = var.vllm_runtime_class_name
+    maxNumSeq               = var.vllm_max_num_seq
+    maxModelLen             = var.vllm_max_model_len
+    gpuMemoryUtilization    = var.vllm_gpu_memory_utilization
+    kvCacheDtype            = var.vllm_kv_cache_dtype
+    enforceEager            = true
+    inferenceServiceAccount = data.terraform_remote_state.infra.outputs.inference_service_account
+  }
+}
+
+resource "helm_release" "inference_application_worker0" {
+  provider         = helm.worker0
+  name             = "inference-application"
+  namespace        = var.inference_namespace
+  create_namespace = false
+  chart            = "${path.module}/charts/inference-application"
+
+  # Cold-start budget: NAP provisions an L4 node (~3-5 min), pulls the ~8GB
+  # vLLM image (~2-3 min), then vLLM downloads the model from GCS and loads
+  # it onto GPU (~3-5 min). Helm's 5-min default is not enough.
+  timeout = 900
+
+  values = [yamlencode(local.inference_application_values)]
+
+  depends_on = [helm_release.inference_routing_worker0]
+}
+
+resource "helm_release" "inference_application_worker1" {
+  provider         = helm.worker1
+  name             = "inference-application"
+  namespace        = var.inference_namespace
+  create_namespace = false
+  chart            = "${path.module}/charts/inference-application"
+
+  timeout = 900
+
+  values = [yamlencode(local.inference_application_values)]
+
+  depends_on = [helm_release.inference_routing_worker1]
 }

@@ -58,7 +58,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 cleanup_bad_pods() {
   # Force-delete pods stuck in Terminating or CrashLoopBackOff (0/2 Ready)
-  for ctx in worker-east1 worker-west3; do
+  for ctx in worker-east1 worker-central1; do
     # Terminating pods (have a deletionTimestamp but haven't gone away)
     local stuck
     stuck=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct \
@@ -90,10 +90,10 @@ do_cleanup() {
   fi
   # Delete load generator pods
   echo -e "  ${DIM}Deleting load generator pods...${NC}"
-  for ctx in worker-east1 worker-west3; do
+  for ctx in worker-east1 worker-central1; do
     kubectl delete pods -n inference-server --context $ctx -l run --field-selector=status.phase=Running --ignore-not-found=true 2>/dev/null &
     for i in $(seq 0 7); do
-      kubectl delete pod "kv-load-gen-east1-$i" "kv-load-gen-west3-$i" -n inference-server --context $ctx --ignore-not-found=true 2>/dev/null &
+      kubectl delete pod "kv-load-gen-east1-$i" "kv-load-gen-central1-$i" -n inference-server --context $ctx --ignore-not-found=true 2>/dev/null &
     done
   done
   # Delete all jobs
@@ -107,12 +107,15 @@ do_cleanup() {
   wait
   # Clean up bad pods
   cleanup_bad_pods
-  # Reset HPAs back to min=2, max=6 and scale deployments to 2 replicas
-  echo -e "  ${DIM}Resetting HPAs to min=2, max=6...${NC}"
-  kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-east1 2>/dev/null || true
-  kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-west3 2>/dev/null || true
-  kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-east1 2>/dev/null || true
-  kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-west3 2>/dev/null || true
+  # Drain GPUs: delete HPAs and scale inference Deployment to 0 so the
+  # cluster autoscaler reclaims L4 nodes between demo runs. Install staged
+  # the Deployment at replicas=0, so this returns the data plane to its
+  # idle baseline.
+  echo -e "  ${DIM}Deleting HPAs and scaling inference Deployment to 0...${NC}"
+  kubectl delete hpa vllm-inference-hpa -n inference-server --context worker-east1 --ignore-not-found=true 2>/dev/null || true
+  kubectl delete hpa vllm-inference-hpa -n inference-server --context worker-central1 --ignore-not-found=true 2>/dev/null || true
+  kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=0 --context worker-east1 2>/dev/null || true
+  kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=0 --context worker-central1 2>/dev/null || true
   echo -e "${GREEN}Cleanup complete.${NC}"
 }
 
@@ -120,8 +123,8 @@ trap '' EXIT INT TERM  # overridden below after pre-flight
 
 # ── Helper: show GPU state across clusters ────────────────────────────────────
 show_gpu_state() {
-  for ctx in worker-east1 worker-west3; do
-    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+  for ctx in worker-east1 worker-central1; do
+    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "central1")
     # Inference pods: 1 GPU each
     inf=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
     # Training pods: sum actual GPU requests (some pods request >1 GPU)
@@ -164,11 +167,19 @@ spec:
           backoffLimit: 0
           template:
             spec:
+              # Schedule via the inference-gpu ComputeClass (3-mcig stack), so
+              # training pods land on the same Spot-first L4 fallback as the
+              # inference Deployment.
               nodeSelector:
-                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+                cloud.google.com/compute-class: inference-gpu
               tolerations:
                 - key: nvidia.com/gpu
                   operator: Exists
+                  effect: NoSchedule
+                # Spot taint so training pods can land on Spot priority of the ComputeClass.
+                - key: cloud.google.com/gke-spot
+                  operator: Equal
+                  value: "true"
                   effect: NoSchedule
                 - key: sandbox.gke.io/runtime
                   operator: Exists
@@ -218,11 +229,19 @@ spec:
           backoffLimit: 0
           template:
             spec:
+              # Schedule via the inference-gpu ComputeClass (3-mcig stack), so
+              # training pods land on the same Spot-first L4 fallback as the
+              # inference Deployment.
               nodeSelector:
-                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+                cloud.google.com/compute-class: inference-gpu
               tolerations:
                 - key: nvidia.com/gpu
                   operator: Exists
+                  effect: NoSchedule
+                # Spot taint so training pods can land on Spot priority of the ComputeClass.
+                - key: cloud.google.com/gke-spot
+                  operator: Equal
+                  value: "true"
                   effect: NoSchedule
                 - key: sandbox.gke.io/runtime
                   operator: Exists
@@ -253,9 +272,9 @@ EOF
 
 echo -e "${DIM}Pre-flight: cleaning up leftover resources from previous runs...${NC}"
 # Delete leftover load gen pods
-for ctx in worker-east1 worker-west3; do
+for ctx in worker-east1 worker-central1; do
   for i in $(seq 0 7); do
-    kubectl delete pod "kv-load-gen-east1-$i" "kv-load-gen-west3-$i" -n inference-server --context $ctx --ignore-not-found=true 2>/dev/null &
+    kubectl delete pod "kv-load-gen-east1-$i" "kv-load-gen-central1-$i" -n inference-server --context $ctx --ignore-not-found=true 2>/dev/null &
   done
 done
 # Delete leftover jobs
@@ -270,9 +289,9 @@ wait
 cleanup_bad_pods
 # Reset HPAs and scale
 kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-east1 2>/dev/null || true
-kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-west3 2>/dev/null || true
+kubectl apply -f "$SCRIPT_DIR/kueue/hpa-inference.yaml" --context worker-central1 2>/dev/null || true
 kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-east1 2>/dev/null || true
-kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-west3 2>/dev/null || true
+kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-central1 2>/dev/null || true
 echo -e "${GREEN}Pre-flight complete.${NC}"
 echo ""
 
@@ -295,7 +314,7 @@ echo -e "  ${MAGENTA}1.${NC} Low-priority experiments fill available GPU capacit
 echo -e "  ${CYAN}2.${NC} Inference HPA scales up under load, evicting experiments"
 echo -e "  ${RED}3.${NC} Critical pre-training job preempts even inference servers"
 echo ""
-echo -e "  ${DIM}Clusters: us-east1 (8 GPUs) + us-west3 (8 GPUs) = 16 GPUs total${NC}"
+echo -e "  ${DIM}Clusters: us-east1 (8 GPUs) + us-central1 (8 GPUs) = 16 GPUs total${NC}"
 echo ""
 
 narrate "Initial GPU state"
@@ -385,10 +404,10 @@ for tick in $(seq 1 8); do
   echo -e "  ${DIM}── $(date +%H:%M:%S) ──${NC}"
   show_gpu_state
   # Check if critical job pods are running
-  for ctx in worker-east1 worker-west3; do
+  for ctx in worker-east1 worker-central1; do
     count=$(kubectl get pods -n training-jobs --context $ctx -l "jobset.sigs.k8s.io/jobset-name=pre-training-2" --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
     if [ "$count" -ge 6 ]; then
-      label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+      label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "central1")
       echo ""
       echo -e "  ${GREEN}✓${NC} ${RED}${BOLD}pre-training-2${NC} running on ${BOLD}$label${NC} — 6 GPUs claimed, inference preempted"
       break 2
@@ -416,9 +435,14 @@ echo ""
 
 # Prompt for cleanup
 echo ""
-echo -n -e "${YELLOW}Run cleanup (delete jobs, reset HPAs, remove bad pods)? [Y/n] ${NC}"
-read -r ans
-case "$ans" in
-  [nN]*) echo -e "${DIM}Skipped cleanup. Resources left in place.${NC}" ;;
-  *)     do_cleanup ;;
-esac
+if $AUTO; then
+  echo -e "${DIM}--auto: running cleanup...${NC}"
+  do_cleanup
+else
+  echo -n -e "${YELLOW}Run cleanup (delete jobs, reset HPAs, remove bad pods)? [Y/n] ${NC}"
+  read -r ans
+  case "$ans" in
+    [nN]*) echo -e "${DIM}Skipped cleanup. Resources left in place.${NC}" ;;
+    *)     do_cleanup ;;
+  esac
+fi
