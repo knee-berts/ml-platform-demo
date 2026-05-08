@@ -12,8 +12,9 @@ resource "google_gke_hub_fleet" "default" {
 }
 
 # Multi-Cluster Ingress feature, with the management cluster as the config
-# membership. This is what lets the Gateway in mgmt/gateway.yaml resolve the
-# InferencePool exports across worker clusters.
+# membership. This is what lets the cross-region Gateway (installed by the
+# multi-cluster-inference-gateway helm release in 3-multi-cluster-inference-gateway/)
+# resolve the InferencePool exports across worker clusters.
 resource "google_gke_hub_feature" "multiclusteringress" {
   name     = "multiclusteringress"
   location = "global"
