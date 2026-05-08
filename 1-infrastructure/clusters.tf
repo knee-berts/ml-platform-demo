@@ -386,3 +386,36 @@ resource "google_container_node_pool" "static_accelerator" {
     ]
   }
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pod Snapshots — enable via `gcloud beta container clusters update`. The
+# google/google-beta providers (6.50) don't expose this on
+# google_container_cluster yet, so we drive it through gcloud. The update is
+# idempotent: re-running on an already-enabled cluster is a no-op.
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "null_resource" "pod_snapshots_management" {
+  triggers = {
+    cluster_id = google_container_cluster.management.id
+  }
+
+  provisioner "local-exec" {
+    command = "gcloud beta container clusters update ${google_container_cluster.management.name} --project=${var.project_id} --region=${google_container_cluster.management.location} --enable-pod-snapshots"
+  }
+
+  depends_on = [google_container_node_pool.management_default]
+}
+
+resource "null_resource" "pod_snapshots_workers" {
+  for_each = google_container_cluster.workers
+
+  triggers = {
+    cluster_id = each.value.id
+  }
+
+  provisioner "local-exec" {
+    command = "gcloud beta container clusters update ${each.value.name} --project=${var.project_id} --region=${each.value.location} --enable-pod-snapshots"
+  }
+
+  depends_on = [google_container_node_pool.worker_default]
+}
