@@ -55,63 +55,10 @@ narrate() {
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 LOAD_TEST_PID=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WORKER_CTXS=(worker-east1 worker-west3)
-
-# Manifests applied/torn down by the inference stack helpers below.
-# Order matters for create (deps first); delete walks the reverse order.
-INFERENCE_STACK_MANIFESTS=(
-  "workers/namespace.yaml"
-  "workers/secret.yaml"
-  "workers/gpu-deployment.yaml"
-  "workers/inferencepool.yaml"
-  "workers/endpointpicker.yaml"
-  "workers/inference-objective.yaml"
-  "kueue/hpa-inference.yaml"
-)
-
-create_inference_stack() {
-  echo -e "  ${DIM}Applying inference stack (vLLM + EPP) to ${WORKER_CTXS[*]}...${NC}"
-  for ctx in "${WORKER_CTXS[@]}"; do
-    for f in "${INFERENCE_STACK_MANIFESTS[@]}"; do
-      kubectl apply -f "$SCRIPT_DIR/$f" --context "$ctx" >/dev/null 2>&1 || \
-        echo -e "  ${YELLOW}warn:${NC} apply $f on $ctx failed"
-    done
-  done
-  echo -e "  ${DIM}Waiting for vLLM deployment to be Available (model load can take ~10 min)...${NC}"
-  for ctx in "${WORKER_CTXS[@]}"; do
-    kubectl wait deployment/vllm-llama3-8b-instruct \
-      -n inference-server --context "$ctx" \
-      --for=condition=Available --timeout=15m >/dev/null 2>&1 &
-  done
-  wait
-  for ctx in "${WORKER_CTXS[@]}"; do
-    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
-    if kubectl get deployment/vllm-llama3-8b-instruct -n inference-server --context "$ctx" \
-        -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null | grep -q True; then
-      echo -e "  ${GREEN}✓${NC} vLLM ready on ${BOLD}$label${NC}"
-    else
-      echo -e "  ${YELLOW}!${NC} vLLM not yet Available on ${BOLD}$label${NC} — continuing anyway"
-    fi
-  done
-}
-
-delete_inference_stack() {
-  # Only release GPU-holding objects: the HPA (so it can't fight the scale-down)
-  # and the vLLM Deployment. Everything else (namespace, secret, EPP, InferencePool,
-  # InferenceObjective, ConfigMap, Service) stays — none of it holds GPUs, and keeping
-  # it avoids the namespace-Terminating race on quick re-runs. Next create_inference_stack
-  # re-applies the manifests idempotently.
-  echo -e "  ${DIM}Releasing GPU capacity (HPA + vLLM Deployment) on ${WORKER_CTXS[*]}...${NC}"
-  for ctx in "${WORKER_CTXS[@]}"; do
-    kubectl delete hpa vllm-inference-hpa -n inference-server --context "$ctx" --ignore-not-found=true --wait=false >/dev/null 2>&1 &
-    kubectl delete deployment vllm-llama3-8b-instruct -n inference-server --context "$ctx" --ignore-not-found=true --wait=false >/dev/null 2>&1 &
-  done
-  wait
-}
 
 cleanup_bad_pods() {
   # Force-delete pods stuck in Terminating or CrashLoopBackOff (0/2 Ready)
-  for ctx in worker-east1 worker-west3; do
+  for ctx in worker-east1 worker-central1; do
     # Terminating pods (have a deletionTimestamp but haven't gone away)
     local stuck
     stuck=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct \
@@ -143,10 +90,10 @@ do_cleanup() {
   fi
   # Delete load generator pods
   echo -e "  ${DIM}Deleting load generator pods...${NC}"
-  for ctx in worker-east1 worker-west3; do
+  for ctx in worker-east1 worker-central1; do
     kubectl delete pods -n inference-server --context $ctx -l run --field-selector=status.phase=Running --ignore-not-found=true 2>/dev/null &
     for i in $(seq 0 7); do
-      kubectl delete pod "kv-load-gen-east1-$i" "kv-load-gen-west3-$i" -n inference-server --context $ctx --ignore-not-found=true 2>/dev/null &
+      kubectl delete pod "kv-load-gen-east1-$i" "kv-load-gen-central1-$i" -n inference-server --context $ctx --ignore-not-found=true 2>/dev/null &
     done
   done
   # Delete all jobs
@@ -160,8 +107,15 @@ do_cleanup() {
   wait
   # Clean up bad pods
   cleanup_bad_pods
-  # Tear down the inference stack (vLLM + EPP) on both worker clusters.
-  delete_inference_stack
+  # Drain GPUs: delete HPAs and scale inference Deployment to 0 so the
+  # cluster autoscaler reclaims L4 nodes between demo runs. Install staged
+  # the Deployment at replicas=0 (via the Helm chart), so this returns the
+  # data plane to its idle baseline.
+  echo -e "  ${DIM}Deleting HPAs and scaling inference Deployment to 0...${NC}"
+  kubectl delete hpa vllm-inference-hpa -n inference-server --context worker-east1 --ignore-not-found=true 2>/dev/null || true
+  kubectl delete hpa vllm-inference-hpa -n inference-server --context worker-central1 --ignore-not-found=true 2>/dev/null || true
+  kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=0 --context worker-east1 2>/dev/null || true
+  kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=0 --context worker-central1 2>/dev/null || true
   echo -e "${GREEN}Cleanup complete.${NC}"
 }
 
@@ -169,8 +123,8 @@ trap '' EXIT INT TERM  # overridden below after pre-flight
 
 # ── Helper: show GPU state across clusters ────────────────────────────────────
 show_gpu_state() {
-  for ctx in worker-east1 worker-west3; do
-    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+  for ctx in worker-east1 worker-central1; do
+    label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "central1")
     # Inference pods: 1 GPU each
     inf=$(kubectl get pods -n inference-server --context $ctx -l app=vllm-llama3-8b-instruct --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
     # Training pods: sum actual GPU requests (some pods request >1 GPU)
@@ -188,58 +142,14 @@ show_gpu_state() {
   echo -e "  ${DIM}Legend: ${CYAN}█${NC}${DIM}=inference ${MAGENTA}█${NC}${DIM}=training ░=free${NC}"
 }
 
-# ── Helper: submit experiment (1 GPU, 30s) ────────────────────────────────────
+# ── Helper: submit experiment (1 GPU, 60s) ────────────────────────────────────
 submit_small_job() {
   local job_name=$1
   local job_num=$2
   kubectl delete jobset "$job_name" -n training-jobs --context mgmt --ignore-not-found=true 2>/dev/null
-  cat <<EOF | kubectl create --context mgmt -f - 2>&1 | grep -v "^$"
-apiVersion: jobset.x-k8s.io/v1alpha2
-kind: JobSet
-metadata:
-  name: $job_name
-  namespace: training-jobs
-  labels:
-    kueue.x-k8s.io/queue-name: training-queue
-    kueue.x-k8s.io/priority-class: training-low
-spec:
-  replicatedJobs:
-    - name: worker
-      replicas: 1
-      template:
-        spec:
-          parallelism: 1
-          completions: 1
-          backoffLimit: 0
-          template:
-            spec:
-              nodeSelector:
-                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
-              tolerations:
-                - key: nvidia.com/gpu
-                  operator: Exists
-                  effect: NoSchedule
-                - key: sandbox.gke.io/runtime
-                  operator: Exists
-                  effect: NoSchedule
-              containers:
-                - name: training-sim
-                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
-                  command: ["bash", "-c"]
-                  args:
-                    - |
-                      echo "=== Experiment $job_num ==="
-                      nvidia-smi
-                      echo "Running experiment for 60 seconds..."
-                      sleep 60
-                      echo "Experiment complete."
-                  resources:
-                    requests:
-                      nvidia.com/gpu: "1"
-                    limits:
-                      nvidia.com/gpu: "1"
-              restartPolicy: Never
-EOF
+  JOB_NAME="$job_name" JOB_NUM="$job_num" \
+    envsubst < "$SCRIPT_DIR/workers/experiment.yaml" \
+    | kubectl create --context mgmt -f - 2>&1 | grep -v "^$"
 }
 
 # ── Helper: submit pre-training job (6 replicas x 1 GPU each, 10min) ────────
@@ -247,53 +157,9 @@ submit_critical_job() {
   local job_name=${1:-pre-training-1}
   local ctx=${2:-mgmt}
   kubectl delete jobset "$job_name" -n training-jobs --context "$ctx" --ignore-not-found=true 2>/dev/null
-  cat <<EOF | kubectl create --context "$ctx" -f - 2>&1 | grep -v "^$"
-apiVersion: jobset.x-k8s.io/v1alpha2
-kind: JobSet
-metadata:
-  name: $job_name
-  namespace: training-jobs
-  labels:
-    kueue.x-k8s.io/queue-name: training-queue
-    kueue.x-k8s.io/priority-class: training-critical
-spec:
-  replicatedJobs:
-    - name: worker
-      replicas: 6
-      template:
-        spec:
-          parallelism: 1
-          completions: 1
-          backoffLimit: 0
-          template:
-            spec:
-              nodeSelector:
-                cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
-              tolerations:
-                - key: nvidia.com/gpu
-                  operator: Exists
-                  effect: NoSchedule
-                - key: sandbox.gke.io/runtime
-                  operator: Exists
-                  effect: NoSchedule
-              containers:
-                - name: training-sim
-                  image: nvidia/cuda:12.6.3-base-ubuntu24.04
-                  command: ["bash", "-c"]
-                  args:
-                    - |
-                      echo "=== Pre-Training Job (1 GPU) ==="
-                      nvidia-smi
-                      echo "Pre-training for 10 minutes..."
-                      sleep 600
-                      echo "Pre-training complete."
-                  resources:
-                    requests:
-                      nvidia.com/gpu: "1"
-                    limits:
-                      nvidia.com/gpu: "1"
-              restartPolicy: Never
-EOF
+  JOB_NAME="$job_name" \
+    envsubst < "$SCRIPT_DIR/workers/critical-pretraining.yaml" \
+    | kubectl create --context "$ctx" -f - 2>&1 | grep -v "^$"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -302,9 +168,9 @@ EOF
 
 echo -e "${DIM}Pre-flight: cleaning up leftover resources from previous runs...${NC}"
 # Delete leftover load gen pods
-for ctx in worker-east1 worker-west3; do
+for ctx in worker-east1 worker-central1; do
   for i in $(seq 0 7); do
-    kubectl delete pod "kv-load-gen-east1-$i" "kv-load-gen-west3-$i" -n inference-server --context $ctx --ignore-not-found=true 2>/dev/null &
+    kubectl delete pod "kv-load-gen-east1-$i" "kv-load-gen-central1-$i" -n inference-server --context $ctx --ignore-not-found=true 2>/dev/null &
   done
 done
 # Delete leftover jobs
@@ -317,8 +183,12 @@ kubectl delete jobset "pre-training-2" -n training-jobs --context mgmt --ignore-
 wait
 # Clean up bad inference pods
 cleanup_bad_pods
-# Bring up the inference stack (vLLM + EPP) on each worker cluster.
-create_inference_stack
+# Reset HPAs and scale the inference Deployment up. The Helm chart staged
+# the Deployment at replicas=0; the HPA pulls it back to min=2 once applied.
+kubectl apply -f "$SCRIPT_DIR/workers/hpa-inference.yaml" --context worker-east1 2>/dev/null || true
+kubectl apply -f "$SCRIPT_DIR/workers/hpa-inference.yaml" --context worker-central1 2>/dev/null || true
+kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-east1 2>/dev/null || true
+kubectl scale deployment vllm-llama3-8b-instruct -n inference-server --replicas=2 --context worker-central1 2>/dev/null || true
 echo -e "${GREEN}Pre-flight complete.${NC}"
 echo ""
 
@@ -341,7 +211,7 @@ echo -e "  ${MAGENTA}1.${NC} Low-priority experiments fill available GPU capacit
 echo -e "  ${CYAN}2.${NC} Inference HPA scales up under load, evicting experiments"
 echo -e "  ${RED}3.${NC} Critical pre-training job preempts even inference servers"
 echo ""
-echo -e "  ${DIM}Clusters: us-east1 (8 GPUs) + us-west3 (8 GPUs) = 16 GPUs total${NC}"
+echo -e "  ${DIM}Clusters: us-east1 (8 GPUs) + us-central1 (8 GPUs) = 16 GPUs total${NC}"
 echo ""
 
 narrate "Initial GPU state"
@@ -431,10 +301,10 @@ for tick in $(seq 1 8); do
   echo -e "  ${DIM}── $(date +%H:%M:%S) ──${NC}"
   show_gpu_state
   # Check if critical job pods are running
-  for ctx in worker-east1 worker-west3; do
+  for ctx in worker-east1 worker-central1; do
     count=$(kubectl get pods -n training-jobs --context $ctx -l "jobset.sigs.k8s.io/jobset-name=pre-training-2" --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
     if [ "$count" -ge 6 ]; then
-      label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "west3")
+      label=$([ "$ctx" = "worker-east1" ] && echo "east1" || echo "central1")
       echo ""
       echo -e "  ${GREEN}✓${NC} ${RED}${BOLD}pre-training-2${NC} running on ${BOLD}$label${NC} — 6 GPUs claimed, inference preempted"
       break 2
@@ -462,9 +332,14 @@ echo ""
 
 # Prompt for cleanup
 echo ""
-echo -n -e "${YELLOW}Run cleanup (delete jobs, reset HPAs, remove bad pods)? [Y/n] ${NC}"
-read -r ans
-case "$ans" in
-  [nN]*) echo -e "${DIM}Skipped cleanup. Resources left in place.${NC}" ;;
-  *)     do_cleanup ;;
-esac
+if $AUTO; then
+  echo -e "${DIM}--auto: running cleanup...${NC}"
+  do_cleanup
+else
+  echo -n -e "${YELLOW}Run cleanup (delete jobs, reset HPAs, remove bad pods)? [Y/n] ${NC}"
+  read -r ans
+  case "$ans" in
+    [nN]*) echo -e "${DIM}Skipped cleanup. Resources left in place.${NC}" ;;
+    *)     do_cleanup ;;
+  esac
+fi

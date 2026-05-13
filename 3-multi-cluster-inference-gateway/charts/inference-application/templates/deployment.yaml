@@ -1,0 +1,169 @@
+{{- $args := .Values.vllmArgs }}
+{{- if not $args }}
+{{-   $args = list
+        "--model" .Values.modelWeightsPath
+        "--served-model-name" .Values.servedModelName
+        "--load-format" "runai_streamer"
+        "--model-loader-extra-config" "{\"distributed\":true}"
+        "--tensor-parallel-size" "1"
+        "--port" "8000"
+        "--max-num-seq" (toString .Values.maxNumSeq)
+        "--max-model-len" (toString .Values.maxModelLen)
+        "--gpu-memory-utilization" (toString .Values.gpuMemoryUtilization)
+        "--enable-lora"
+        "--max-loras" (toString .Values.maxLoras)
+        "--max-lora-rank" (toString .Values.maxLoraRank)
+        "--max-cpu-loras" (toString .Values.maxCpuLoras)
+}}
+{{-   if .Values.enforceEager }}
+{{-     $args = append $args "--enforce-eager" }}
+{{-   end }}
+{{-   if .Values.kvCacheDtype }}
+{{-     $args = append $args "--kv-cache-dtype" }}
+{{-     $args = append $args .Values.kvCacheDtype }}
+{{-   end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.inferencePoolName }}
+  namespace: {{ .Values.inferenceNamespace }}
+  labels:
+    kueue.x-k8s.io/queue-name: {{ .Values.kueueQueueName | quote }}
+    kueue.x-k8s.io/priority-class: {{ .Values.kueuePriorityClass | quote }}
+spec:
+  # Default 0 so the install path stages everything (Deployment object, Secret,
+  # ConfigMap, ServiceAccount, Service) without consuming any GPUs. The
+  # preemption demo's pre-flight scales to N and applies the HPA; the demo's
+  # cleanup scales back to 0 and deletes the HPA, so GPU pools drain between
+  # runs. Override `replicas` if you want a baseline always-on inference fleet.
+  replicas: {{ .Values.replicas | default 0 }}
+  selector:
+    matchLabels:
+      app: {{ .Values.inferencePoolName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.inferencePoolName }}
+        kueue.x-k8s.io/queue-name: {{ .Values.kueueQueueName | quote }}
+        kueue.x-k8s.io/priority-class: {{ .Values.kueuePriorityClass | quote }}
+    spec:
+      serviceAccountName: {{ .Values.inferencePoolName }}
+
+      {{- with .Values.runtimeClassName }}
+      runtimeClassName: {{ . }}
+      {{- end }}
+
+      # Schedule via the inference-gpu ComputeClass (3-mcig/.../compute-class.yaml).
+      # The chart's default priority list is L4 spot → L4 on-demand. Add a
+      # Blackwell tier by setting `enable_blackwell_compute_class_tier=true` in 3-mcig.
+      nodeSelector:
+        cloud.google.com/compute-class: {{ .Values.computeClassName }}
+
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        # Required so the L4 Spot priority is reachable — Spot nodes are tainted
+        # cloud.google.com/gke-spot=true:NoSchedule by GKE.
+        - key: cloud.google.com/gke-spot
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+
+      # Prevents a 'vllm' Service in the namespace from injecting VLLM_PORT
+      # as tcp://<IP>:<PORT>, which crashes vLLM (expects a numeric value).
+      enableServiceLinks: false
+
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+
+      initContainers:
+        - name: lora-adapter-syncer
+          image: {{ .Values.loraSyncerImage | quote }}
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always   # sidecar semantic (Kubernetes 1.29+)
+          tty: true
+          stdin: true
+          env:
+            - name: DYNAMIC_LORA_ROLLOUT_CONFIG
+              value: "/config/configmap.yaml"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+            - name: data
+              mountPath: /data
+
+      containers:
+        - name: vllm
+          image: {{ required "image is required (set vllm_image)" .Values.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+          args:
+            {{- range $args }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: VLLM_USE_V1
+              value: "1"
+            - name: VLLM_ATTENTION_BACKEND
+              value: "FLASHINFER"
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+            - name: PORT
+              value: "8000"
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: token
+            - name: VLLM_ALLOW_RUNTIME_LORA_UPDATING
+              value: "true"
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 30
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: {{ .Values.startupFailureThreshold }}
+            initialDelaySeconds: 2
+            periodSeconds: 1
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 1
+            failureThreshold: 5
+            timeoutSeconds: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 1
+            failureThreshold: 1
+            timeoutSeconds: 1
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: shm
+          emptyDir:
+            medium: Memory
+        - name: config-volume
+          configMap:
+            name: {{ .Values.inferencePoolName }}-adapters

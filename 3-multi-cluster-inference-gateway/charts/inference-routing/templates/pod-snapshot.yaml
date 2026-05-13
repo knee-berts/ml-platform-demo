@@ -1,0 +1,35 @@
+{{- if .Values.enablePodSnapshot }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm-snapshot-sa
+  namespace: {{ .Values.inferenceNamespace }}
+  {{- if .Values.podSnapshotServiceAccount }}
+  annotations:
+    iam.gke.io/gcp-service-account: {{ .Values.podSnapshotServiceAccount | quote }}
+  {{- end }}
+---
+apiVersion: podsnapshot.gke.io/v1alpha1
+kind: PodSnapshotStorageConfig
+metadata:
+  name: vllm-snapshot-storage
+spec:
+  snapshotStorageConfig:
+    gcs:
+      bucket: {{ .Values.podSnapshotBucket | quote }}
+      path: {{ .Values.inferenceNamespace | quote }}
+---
+apiVersion: podsnapshot.gke.io/v1alpha1
+kind: PodSnapshotPolicy
+metadata:
+  name: vllm-snapshot-policy
+  namespace: {{ .Values.inferenceNamespace }}
+spec:
+  storageConfigName: vllm-snapshot-storage
+  selector:
+    matchLabels:
+      app: {{ .Values.inferencePoolName | quote }}
+  triggerConfig:
+    type: manual
+    postCheckpoint: resume
+{{- end }}

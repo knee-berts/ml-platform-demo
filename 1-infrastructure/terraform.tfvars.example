@@ -1,0 +1,42 @@
+project_id = "kubecon-fleets-demo-1"
+
+# Management cluster region. Also the location of the Artifact Registry repo
+# and the multi-cluster ingress config membership.
+region = "us-east1"
+
+# Worker clusters — one Standard cluster per region. By default no fixed GPU
+# pool; the inference-gpu ComputeClass drives NAP-managed L4 pools.
+worker_regions = ["us-east1", "us-central1"]
+
+# ─── Happy path (default) ────────────────────────────────────────────────────
+# No static accelerator pool. NAP creates g2-standard-12 (L4) Spot/on-demand
+# pools when GPUs are needed and drains them between demo runs. Use
+# Dockerfile.l4 for the vLLM image build.
+
+# ─── Heavy / static accelerator pool (opt-in) ────────────────────────────────
+# Set static_accelerator_machine_type to attach a fixed GPU pool to every
+# worker. Accelerator type is inferred from the prefix:
+#   g4-* → Blackwell (nvidia-rtx-pro-6000)   — use Dockerfile.blackwell
+#   g2-* → L4        (nvidia-l4)             — use Dockerfile.l4
+#
+# Confirm GPU quota in every worker region. For Blackwell, supply a reservation
+# — RTX PRO 6000 capacity is scarce and creation usually fails without one.
+
+# static_accelerator_machine_type   = "g4-standard-48"
+# static_accelerator_count_per_node = 1
+# static_accelerator_min_node_count = 0
+# static_accelerator_max_node_count = 8
+# static_accelerator_disk_size_gb   = 200
+# static_accelerator_reservation    = "my-blackwell-reservation"
+
+# ─── Management node pool sizing ─────────────────────────────────────────────
+# management_machine_type   = "e2-standard-8"
+# management_min_node_count = 1
+# management_max_node_count = 4
+
+# ─── NAP limits (worker clusters) ────────────────────────────────────────────
+# nap_cpu_max       = 128
+# nap_memory_max_gb = 512
+# nap_l4_max_count  = 8
+
+# release_channel = "RAPID"

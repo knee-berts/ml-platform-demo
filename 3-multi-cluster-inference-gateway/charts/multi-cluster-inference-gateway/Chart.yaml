@@ -1,0 +1,5 @@
+apiVersion: v2
+name: multi-cluster-inference-gateway
+description: Cross-region multi-cluster Gateway resource for the inference fleet. Mirrors the upstream fleet-charts/multi-cluster-inference-gateway structure.
+version: 0.1.0
+type: application

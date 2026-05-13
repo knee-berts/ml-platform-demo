@@ -1,0 +1,43 @@
+# Cloud Build config for the derived Kueue manager image with gcp-auth-plugin.
+#
+# Run from the 2-multikueue directory:
+#   gcloud builds submit . --config docker/kueue-with-gcp-auth/cloudbuild.yaml \
+#     --project=<your-project> \
+#     --substitutions=_KUEUE_VERSION=v0.15.1
+#
+# The _AUTH_PLUGIN_IMAGE default targets the gcp-auth-plugin repo created by
+# the 1-infrastructure stack in the same project. Override if your binary lives
+# elsewhere (e.g. cross-project).
+#
+# Note: Cloud Build does not expand ${PROJECT_ID} inside substitution
+# defaults — only inside `args` and `images` fields. So _AUTH_PLUGIN_IMAGE
+# defaults to a literal placeholder; override on the command line.
+substitutions:
+  # _KUEUE_VERSION is the upstream Kueue tag (used in the FROM line of the
+  # Dockerfile, must include `v` prefix). _TAG is the tag we apply to the
+  # OUTPUT image (no `v` prefix, matches the helm chart's
+  # `kueue_manager_image_tag = "0.15.1"`). Keep them in sync — install.sh
+  # passes both, derived from a single KUEUE_TAG env var.
+  _KUEUE_VERSION: v0.15.1
+  _TAG: "0.15.1"
+  _AUTH_PLUGIN_IMAGE: ""
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - KUEUE_VERSION=${_KUEUE_VERSION}
+      - --build-arg
+      - AUTH_PLUGIN_IMAGE=${_AUTH_PLUGIN_IMAGE}
+      - -t
+      - us-east1-docker.pkg.dev/${PROJECT_ID}/vllm-blackwell/kueue-with-gcp-auth:${_TAG}
+      - -f
+      - docker/kueue-with-gcp-auth/Dockerfile
+      - .
+
+images:
+  - us-east1-docker.pkg.dev/${PROJECT_ID}/vllm-blackwell/kueue-with-gcp-auth:${_TAG}
+
+options:
+  logging: CLOUD_LOGGING_ONLY

@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: least-disruption-dispatcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: least-disruption-dispatcher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: least-disruption-dispatcher
+  template:
+    metadata:
+      labels:
+        app: least-disruption-dispatcher
+    spec:
+      serviceAccountName: least-disruption-dispatcher
+      initContainers:
+        - name: gcp-auth-plugin-init
+          image: {{ .Values.gcpAuthPluginImage | quote }}
+          command: ["cp", "/gcp-auth-plugin", "/plugins/gcp-auth-plugin"]
+          volumeMounts:
+            - name: plugins
+              mountPath: /plugins
+      containers:
+        - name: dispatcher
+          image: {{ .Values.image | quote }}
+          ports:
+            - containerPort: 8081
+              name: health
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: plugins
+              mountPath: /plugins
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: plugins
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: least-disruption-dispatcher-config
+      restartPolicy: Always

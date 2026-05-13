@@ -1,0 +1,5 @@
+apiVersion: v2
+name: kueue-config
+description: Kueue scheduling primitives for the demo (priority classes, resource flavor, cluster queue, local queues, training namespace).
+version: 0.1.0
+type: application

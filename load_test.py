@@ -3,8 +3,8 @@
 load_test.py — KV-Cache Spillover, Flow Control & Kueue Preemption Demo
 
 Saturates east1's KV cache past the 60% GCPBackendPolicy threshold,
-then watches live as the multi-cluster LB shifts traffic to west3.
-Also monitors Kueue workloads on west3 — shows training jobs being
+then watches live as the multi-cluster LB shifts traffic to central1.
+Also monitors Kueue workloads on central1 — shows training jobs being
 preempted as inference scales out to claim GPU capacity.
 
 Supports EPP flow control: sends x-gateway-inference-objective and
@@ -15,7 +15,7 @@ Usage:
 
 Requirements:
     pip install rich
-    kubectl contexts: worker-east1, worker-west3
+    kubectl contexts: worker-east1, worker-central1
 """
 
 import argparse
@@ -54,8 +54,8 @@ LOAD_NAMESPACE  = "inference-server"
 CLUSTER_CONFIGS = {
     "us-east1": {"context": "worker-east1", "namespace": "inference-server",
                  "color": "red",  "label": "🔴 us-east1"},
-    "us-west3": {"context": "worker-west3", "namespace": "inference-server",
-                 "color": "blue", "label": "🔵 us-west3"},
+    "us-central1": {"context": "worker-central1", "namespace": "inference-server",
+                 "color": "blue", "label": "🔵 us-central1"},
 }
 
 MGMT_CONTEXT = "mgmt"
@@ -221,7 +221,7 @@ class KueueState:
 
 
 class KueueCollector(threading.Thread):
-    """Polls Kueue workloads, training pods, and HPA status on west3."""
+    """Polls Kueue workloads, training pods, and HPA status on central1."""
     def __init__(self, kueue_state: KueueState):
         super().__init__(daemon=True)
         self.state = kueue_state
@@ -631,7 +631,7 @@ def kubectl(*args, context: str = "", timeout: int = 15) -> Tuple[str, int]:
 def discover_gateway_vips() -> Dict[str, str]:
     """Discover per-region VIPs from the cross-region gateway on the mgmt cluster.
 
-    Returns {"us-east1": "10.x.x.x", "us-west3": "10.x.x.x", ...}.
+    Returns {"us-east1": "10.x.x.x", "us-central1": "10.x.x.x", ...}.
     The gateway spec addresses contain region info in the type field, and
     status addresses are assigned IPs in the same order.
     """
@@ -1043,7 +1043,7 @@ class Dashboard:
                  epp_state: Optional[EppState] = None,
                  load_active: bool = True,
                  target_cluster: str = "us-east1",
-                 spill_cluster: str = "us-west3",
+                 spill_cluster: str = "us-central1",
                  objective: str = "food-review-prod"):
         self.clusters   = clusters
         self.stats      = stats
@@ -1165,7 +1165,7 @@ class Dashboard:
         sc = self.spill_cluster
         tc_cfg = CLUSTER_CONFIGS[tc]
         sc_cfg = CLUSTER_CONFIGS[sc]
-        tc_label = tc.replace("us-", "")   # e.g. "east1", "west3"
+        tc_label = tc.replace("us-", "")   # e.g. "east1", "central1"
         sc_label = sc.replace("us-", "")
 
         target_cm = self.clusters[tc]
@@ -1248,7 +1248,7 @@ class Dashboard:
         hpa_text = Text()
         hpa_text.append("  HPA  ", style="bold dim")
         with ks._lock:
-            for cname in ["us-east1", "us-west3"]:
+            for cname in ["us-east1", "us-central1"]:
                 cfg = CLUSTER_CONFIGS[cname]
                 r = ks.hpa_replicas.get(cname)
                 if r:
@@ -1360,7 +1360,7 @@ class Dashboard:
             else:
                 wl_type = "experiment"
                 type_style = "magenta"
-            cluster_label = "east1" if "east" in wl.cluster else "west3"
+            cluster_label = "east1" if "east" in wl.cluster else "central1"
             cluster_style = "red" if "east" in wl.cluster else "blue"
 
             if wl.phase == "Evicted":
@@ -1396,7 +1396,7 @@ class Dashboard:
         pods_text = Text()
         if training_pods:
             pods_text.append("  Experiment/Pre-training pods: ", style="dim")
-            for cname, clabel, cstyle in [("us-east1", "east1", "red"), ("us-west3", "west3", "blue")]:
+            for cname, clabel, cstyle in [("us-east1", "east1", "red"), ("us-central1", "central1", "blue")]:
                 cpods = [p for p in training_pods if p.get("cluster") == cname]
                 if not cpods:
                     continue
@@ -1430,7 +1430,7 @@ class Dashboard:
         # Count GPUs per cluster
         evicted_count = sum(1 for wl in workloads if wl.evicted)
         gpu_parts = []
-        for cname, clabel, cstyle in [("us-east1", "east1", "red"), ("us-west3", "west3", "blue")]:
+        for cname, clabel, cstyle in [("us-east1", "east1", "red"), ("us-central1", "central1", "blue")]:
             cwl = [wl for wl in workloads if wl.cluster == cname]
             cinf = sum(wl.gpu_count for wl in cwl if wl.namespace == "inference-server" and wl.admitted)
             cexp = sum(wl.gpu_count for wl in cwl if wl.namespace == "training-jobs" and "pre-training" not in wl.name and wl.admitted)
@@ -1464,7 +1464,7 @@ class Dashboard:
 
         total_queued = 0
         any_saturated = False
-        for cname in ["us-east1", "us-west3"]:
+        for cname in ["us-east1", "us-central1"]:
             cfg = CLUSTER_CONFIGS[cname]
             label = cname.replace("us-", "")
             m = es.get(cname)
@@ -1551,7 +1551,7 @@ class Dashboard:
                 t.append(
                     f"\n  [dim]Direct load fills east1 KV cache. "
                     f"Once east1 > {KV_THRESHOLD*100:.0f}%, GCP LB routes new VIP "
-                    f"traffic to west3 (metric propagation ~10–60 s)[/dim]"
+                    f"traffic to central1 (metric propagation ~10–60 s)[/dim]"
                 )
             else:
                 t.append(
@@ -1614,7 +1614,7 @@ class Dashboard:
         ))
         layout["clusters"].split_row(
             Layout(self._cluster_panel("us-east1"), name="east"),
-            Layout(self._cluster_panel("us-west3"), name="west"),
+            Layout(self._cluster_panel("us-central1"), name="west"),
         )
         layout["routing"].update(self._routing_panel())
         if has_epp:
@@ -1678,13 +1678,13 @@ def main():
                              "higher = longer in-flight time = more KV blocks held")
     parser.add_argument("--direct-ip",   default="",
                         help="Target this IP:port directly (e.g. east1 ClusterIP 34.118.238.239:8000) "
-                             "to fill east1 KV cache without LB distributing to west3. "
+                             "to fill east1 KV cache without LB distributing to central1. "
                              "Useful to demonstrate spillover: fill east1 directly, "
-                             "then new VIP traffic routes to west3.")
-    parser.add_argument("--target-cluster", default="east1", choices=["east1", "west3"],
+                             "then new VIP traffic routes to central1.")
+    parser.add_argument("--target-cluster", default="east1", choices=["east1", "central1"],
                         help="Which cluster to run the load generator in and target directly "
-                             "(default east1). Use west3 to validate Kueue preemption: "
-                             "fills west3 KV cache → HPA scales → preempts training jobs.")
+                             "(default east1). Use central1 to validate Kueue preemption: "
+                             "fills central1 KV cache → HPA scales → preempts training jobs.")
     parser.add_argument("--load-pods", type=int, default=4,
                         help="Number of load generator pods to spread concurrency across (default 4)")
     parser.add_argument("--objective", default="food-review-prod",
@@ -1697,7 +1697,7 @@ def main():
     args = parser.parse_args()
 
     # Resolve target and spill clusters from --target-cluster flag
-    target_cluster = f"us-{args.target_cluster}"  # "us-east1" or "us-west3"
+    target_cluster = f"us-{args.target_cluster}"  # "us-east1" or "us-central1"
     spill_cluster  = [c for c in CLUSTER_CONFIGS if c != target_cluster][0]
 
     # Discover VIPs from gateway if not explicitly provided

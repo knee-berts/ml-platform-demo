@@ -1,0 +1,26 @@
+project_id = "kubecon-fleets-demo-1"
+region     = "us-east1"
+
+# vLLM image and weights are normally auto-set by scripts/install.sh based on
+# the project. Override here only when running terraform manually.
+# vllm_image         = "us-east1-docker.pkg.dev/<project>/vllm-blackwell/vllm-blackwell:latest"
+# model_weights_path = "gs://<project>-model-weights/meta-llama/Llama-3.1-8B-Instruct/"
+
+# HF token: pass via TF_VAR_hf_token env var, NOT in this file.
+# hf_token = "hf_..."   # DO NOT COMMIT a real value
+
+# Names below match what the demo's existing manifests use; change only if
+# you also change the application Deployment / load_test references.
+gateway_name        = "cross-region-gateway"
+inference_pool_name = "vllm-llama3-8b-instruct"
+inference_namespace = "inference-server"
+gateway_namespace   = "gateway-system"
+compute_class_name  = "inference-gpu"
+
+# EPP image and tunings.
+epp_image                          = "registry.k8s.io/gateway-api-inference-extension/epp:v1.4.0"
+saturation_kv_cache_util_threshold = 0.90
+saturation_queue_depth_threshold   = 100
+
+# GCLB → cluster custom-metrics balancing threshold (percentage).
+kv_cache_threshold_percent = 60

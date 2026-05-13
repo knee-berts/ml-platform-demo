@@ -1,0 +1,26 @@
+inferencePoolName: vllm-llama3-8b-instruct
+inferenceNamespace: inference-server
+computeClassName: inference-gpu
+
+# Add a Blackwell tier to the ComputeClass priority list. Default off — the
+# demo runs on L4 (spot first, on-demand fallback) so it works in any project
+# without Blackwell quota.
+blackwellEnabled: false
+
+eppImage: registry.k8s.io/gateway-api-inference-extension/epp:v1.4.0
+
+# EPP saturation detector knobs.
+saturationKvCacheUtilThreshold: 0.90
+saturationQueueDepthThreshold: 100
+
+# Reference HPA spec: workers/hpa-inference.yaml (min=2, KV-cache target 0.45).
+# Applied at demo-time by demo-preemption.sh; the chart itself does not
+# install the HPA so install ends with no GPU pressure.
+
+# Pod snapshot config — provided by the 1-infrastructure stack.
+# Requires the GKE Pod Snapshot feature (podsnapshot.gke.io CRDs) to be
+# enabled on the cluster. Set false on clusters where Pod Snapshot isn't
+# available.
+enablePodSnapshot: true
+podSnapshotBucket: ""
+podSnapshotServiceAccount: ""

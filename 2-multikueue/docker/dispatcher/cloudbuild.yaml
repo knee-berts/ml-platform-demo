@@ -1,0 +1,35 @@
+# Cloud Build config for the least-disruption-dispatcher image.
+#
+# Source: /home/nickeberts/blackwell-vllm/dispatcher (Go project with its own
+# Dockerfile). The dispatcher is the workload that runs alongside Kueue on the
+# management cluster (helm release "least-disruption-dispatcher" in 2-multikueue/main.tf).
+#
+# Run from the repo root:
+#   gcloud builds submit dispatcher \
+#     --config 2-multikueue/docker/dispatcher/cloudbuild.yaml \
+#     --project=<your-project>
+#
+# Then point terraform.tfvars at the resulting image:
+#   dispatcher_image = "us-east1-docker.pkg.dev/<project>/vllm-blackwell/least-disruption-dispatcher:<tag>"
+#
+# Note: Cloud Build does not expand ${PROJECT_ID} inside substitution
+# defaults — only inside `args` and `images` fields. So the target path uses
+# ${PROJECT_ID} directly there, not through a nested substitution.
+substitutions:
+  _TAG: latest
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-east1-docker.pkg.dev/${PROJECT_ID}/vllm-blackwell/least-disruption-dispatcher:${_TAG}
+      - -f
+      - Dockerfile
+      - .
+
+images:
+  - us-east1-docker.pkg.dev/${PROJECT_ID}/vllm-blackwell/least-disruption-dispatcher:${_TAG}
+
+options:
+  logging: CLOUD_LOGGING_ONLY

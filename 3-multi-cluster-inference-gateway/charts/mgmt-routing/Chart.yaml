@@ -1,0 +1,5 @@
+apiVersion: v2
+name: mgmt-routing
+description: HTTPRoute, GCPBackendPolicy, HealthCheckPolicy, and the inference-server namespace on the management cluster. Targets GCPInferencePoolImport that GKE auto-creates from worker InferencePool exports.
+version: 0.1.0
+type: application

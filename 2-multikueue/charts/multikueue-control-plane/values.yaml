@@ -1,0 +1,11 @@
+workers: []
+# Each entry shapes one MultiKueueCluster, one standalone ClusterProfile (as a
+# fallback for clusters not registered by fleet-clusterinventory), and an
+# entry in the MultiKueueConfig.spec.clusters list.
+#
+# Example:
+# workers:
+#   - multikueueClusterName: worker-east1-cluster
+#     clusterProfileName:    ai-worker-us-east1-us-east1
+#     displayName:           ai-worker-us-east1
+#     shortName:             worker-east1

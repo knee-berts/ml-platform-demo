@@ -1,10 +1,10 @@
 # Multi-Cluster Inference Gateway + Flow Control + Kueue Preemption Demo
 
-Live demo of GKE's Multi-Cluster Inference Gateway with KV-cache-aware routing, EPP flow control for request-level prioritization, and Kueue-based GPU preemption, running on NVIDIA RTX PRO 6000 Blackwell GPUs.
+Live demo of GKE's Multi-Cluster Inference Gateway with KV-cache-aware routing, EPP flow control for request-level prioritization, and Kueue-based GPU preemption. The default ("happy path") deployment runs on NVIDIA L4 GPUs provisioned by Node Auto-Provisioning; an opt-in static-pool mode targets NVIDIA RTX PRO 6000 Blackwell when you have quota and a reservation.
 
 ## What This Demo Shows
 
-Two GKE worker clusters (`us-east1`, `us-west3`) each run vLLM inference pods serving `meta-llama/Llama-3.1-8B-Instruct` with LoRA adapters. A management cluster ties them together with a cross-region gateway, MultiKueue federation, and an Endpoint Picker (EPP v1.4.0) with flow control for intelligent, priority-aware request routing.
+Two GKE worker clusters each run vLLM inference pods serving `meta-llama/Llama-3.1-8B-Instruct` with LoRA adapters. A management cluster ties them together with a cross-region gateway, MultiKueue federation, and an Endpoint Picker (EPP v1.4.0) with flow control for intelligent, priority-aware request routing.
 
 The demo has three acts:
 
@@ -19,7 +19,7 @@ The demo has three acts:
 ```
                          ┌──────────────────┐
                          │  Management GKE  │
-                         │                  │
+                         │  (Standard)      │
                          │  Gateway + Route │
                          │  MultiKueue      │
                          │  GCPBackendPolicy│
@@ -28,16 +28,21 @@ The demo has three acts:
                     ┌─────────────┴─────────────┐
                     ▼                           ▼
           ┌─────────────────┐           ┌─────────────────┐
-          │  us-east1       │           │  us-west3       │
-          │  (8 GPU)        │           │  (8 GPU)        │
-          │  vLLM pods (2-6)│           │  vLLM pods (0-6)│
+          │  worker-east1   │           │  worker-<other> │
+          │  (Standard)     │           │  (Standard)     │
+          │  vLLM pods      │           │  vLLM pods      │
           │  EPP v1.4.0     │           │  EPP v1.4.0     │
           │  Flow Control   │           │  Flow Control   │
           │  InferencePool  │           │  InferencePool  │
           │  Kueue queues   │           │  Kueue queues   │
-          │  HPA            │           │  HPA (min=0)    │
+          │  HPA            │           │  HPA            │
           └─────────────────┘           └─────────────────┘
 ```
+
+GPUs come from one of two paths, configured per worker in `1-infrastructure/`:
+
+- **Happy path (default):** no fixed GPU pool. The `inference-gpu` ComputeClass drives Node Auto-Provisioning to materialize `g2-standard-12` (L4) Spot or on-demand pools when GPUs are requested, and the cluster autoscaler drains them between demo runs.
+- **Static accelerator pool (opt-in):** set `static_accelerator_machine_type` (`g4-*` for Blackwell, `g2-*` for L4) to attach a fixed pool to every worker. Required for Blackwell — pair with a reservation in each worker region.
 
 ### Routing (Three Tiers)
 
@@ -71,9 +76,9 @@ When GPUs are needed for inference scale-out, Kueue evicts training jobs first.
 
 ## Prerequisites
 
-- `kubectl` with contexts configured: `mgmt`, `worker-east1`, `worker-west3`
+- `kubectl` with contexts configured: `mgmt`, `worker-<region>` for each worker. `scripts/install.sh` sets these up automatically.
 - Python 3.8+ with `rich` installed (`pip install rich`)
-- GKE clusters with manifests already applied (see [Infrastructure Setup](#infrastructure-setup))
+- A deployed instance of the three Terraform stacks (see [Infrastructure Setup](#infrastructure-setup))
 
 ## Running the Demo
 
@@ -84,7 +89,7 @@ The demo is a two-step process: first set up training jobs, then run the load te
 Always start clean. The `--target` flag controls which cluster the load test will saturate (and therefore which cluster gets more HPA headroom).
 
 ```bash
-./demo-reset.sh --target west3
+./demo-reset.sh --target east1
 ```
 
 This:
@@ -94,18 +99,10 @@ This:
 - Restores ClusterQueue GPU quotas
 - Sets HPA limits (target cluster max=6, other max=4)
 
-Options:
-```bash
-./demo-reset.sh --target east1              # Reset everything, target east1
-./demo-reset.sh --target west3              # Reset everything, target west3
-./demo-reset.sh --multikueue --target west3 # Reset only training jobs
-./demo-reset.sh --loadtest --target west3   # Reset only load test state
-```
-
 ### Step 2: Submit Training Jobs (MultiKueue Demo)
 
 ```bash
-./demo-multikueue.sh --target west3
+./demo-multikueue.sh --target east1
 ```
 
 This is an interactive, narrated walkthrough that:
@@ -116,17 +113,12 @@ This is an interactive, narrated walkthrough that:
 4. Submits `training-job-3` (2 GPUs) — Target is full, so MultiKueue dispatches to the other cluster
 5. Shows final state: target has 0 free GPUs, other has 2 free GPUs (room for rescheduled jobs later)
 
-The script prints the suggested load test command at the end.
-
-Add `--auto` for an unattended version with timed pauses (good for recordings):
-```bash
-./demo-multikueue.sh --target west3 --auto
-```
+Add `--auto` for an unattended version with timed pauses (good for recordings).
 
 ### Step 3: Run the Load Test + Dashboard
 
 ```bash
-python3 load_test.py --target-cluster west3 --concurrency 300
+python3 load_test.py --target-cluster east1 --concurrency 300
 ```
 
 This launches load generator pods inside the target cluster and opens a live Rich dashboard showing:
@@ -137,7 +129,18 @@ This launches load generator pods inside the target cluster and opens a live Ric
 - **Kueue panel** — HPA replica counts and scaling metrics, workload table with cluster/type/status, training pod counts, and a live event log showing preemptions and rescheduling
 - **Stats panel** — Load generator target, concurrency, success/error counts, RPS
 
-#### What You'll See
+> **Note:** All demo scripts target the `worker-east1` and `worker-central1` contexts (matching the install.sh defaults). If you override `WORKER_REGIONS` to a different second region, you'll need to patch the cluster names in `demo-reset.sh`, `demo-multikueue.sh`, `demo-preemption.sh`, and `load_test.py`.
+
+The demo's training JobSets and the inference HPA live as reusable YAML templates in [`workers/`](workers/) and are rendered at demo time with `envsubst`:
+
+| File | Used by | Variables |
+|---|---|---|
+| `workers/hpa-inference.yaml` | `demo-preemption.sh` (preflight) | none |
+| `workers/training-job.yaml` | `demo-multikueue.sh::submit_job` | `JOB_NAME`, `JOB_NUM` |
+| `workers/experiment.yaml` | `demo-preemption.sh::submit_small_job` | `JOB_NAME`, `JOB_NUM` |
+| `workers/critical-pretraining.yaml` | `demo-preemption.sh::submit_critical_job` | `JOB_NAME` |
+
+### What You'll See
 
 As load ramps up on the target cluster:
 
@@ -145,8 +148,8 @@ As load ramps up on the target cluster:
 2. HPA detects high utilization and requests more inference replicas
 3. No free GPUs on the target cluster — Kueue preempts a `training-low` job to free a GPU
 4. New inference pod starts on the freed GPU
-5. The evicted training job gets rescheduled by MultiKueue to the other cluster (which has 2 free GPUs)
-6. Events panel shows: `PREEMPTED: training-job-2-xxxxx evicted on west3` followed by `RESCHEDULED: training-job-2-xxxxx → east1`
+5. The evicted training job gets rescheduled by MultiKueue to the other cluster
+6. Events panel shows: `PREEMPTED: training-job-2-xxxxx evicted on east1` followed by `RESCHEDULED: training-job-2-xxxxx → <other>`
 
 ### Dashboard Modes
 
@@ -154,23 +157,21 @@ The dashboard can run independently of the load test:
 
 ```bash
 # Dashboard only — monitor clusters without generating any load
-python3 load_test.py --mode dashboard --target-cluster west3
+python3 load_test.py --mode dashboard --target-cluster east1
 
 # Load only — generate load with periodic text stats (no Rich UI)
-python3 load_test.py --mode load --target-cluster west3 --concurrency 300
+python3 load_test.py --mode load --target-cluster east1 --concurrency 300
 
 # Both (default) — full experience
-python3 load_test.py --mode both --target-cluster west3 --concurrency 300
+python3 load_test.py --mode both --target-cluster east1 --concurrency 300
 ```
-
-Dashboard-only mode is useful when you want to show the live monitoring UI while triggering load from a separate terminal or process.
 
 ### All load_test.py Options
 
 | Flag | Default | Description |
 |---|---|---|
 | `--mode` | `both` | `dashboard`, `load`, or `both` |
-| `--target-cluster` | `east1` | Which cluster to target (`east1` or `west3`). The other becomes the spillover destination. |
+| `--target-cluster` | `east1` | Which cluster to target (`east1` or `central1`). The other becomes the spillover destination. |
 | `--vip` | auto-discovered | Load balancer VIP address |
 | `--concurrency` | `300` | Number of concurrent request workers |
 | `--max-tokens` | `2048` | Max tokens per completion (higher = longer in-flight = more KV blocks held) |
@@ -180,79 +181,93 @@ Dashboard-only mode is useful when you want to show the live monitoring UI while
 
 ## Infrastructure Setup
 
-The infrastructure spans three GKE clusters in project `kubecon-fleets-demo-1`.
+The infrastructure spans three GKE Standard clusters (one management hub plus N workers, default 2).
 
-### Clusters
+### Quick install (one command)
 
-| Cluster | Role | Region | kubectl context |
-|---|---|---|---|
-| Management | Gateway, HTTPRoute, MultiKueue control plane | — | `mgmt` |
-| ai-worker-us-east1 | Worker: inference + training | us-east1 | `worker-east1` |
-| ai-worker-us-west3 | Worker: inference + training | us-west3 | `worker-west3` |
+`scripts/install.sh` provisions the full demo in any GCP project:
 
-### Manifests
+```bash
+export PROJECT_ID=your-gcp-project
+export HF_TOKEN=hf_xxx     # https://huggingface.co/settings/tokens
 
-Apply in order. Worker manifests go to both `worker-east1` and `worker-west3` contexts.
+# Optional: opt into a static accelerator pool (default = NAP-driven L4)
+# export STATIC_ACCELERATOR_MACHINE_TYPE=g4-standard-48
+# export STATIC_ACCELERATOR_RESERVATION=blackwell-demo-reservation
 
-**Workers** (`workers/`):
+./scripts/install.sh
+```
 
-| File | What it creates |
+The script:
+
+1. Enables required APIs.
+2. `terraform apply` for [`1-infrastructure/`](1-infrastructure/) — Standard clusters, fleet, IAM, AR repos, GCS buckets.
+3. Cloud-Builds and pushes 4 images to the project's Artifact Registry: `gcp-auth-plugin`, `kueue-with-gcp-auth`, `least-disruption-dispatcher`, `vllm-blackwell`. The vLLM image picks `Dockerfile.l4` by default; `g4-*` machine types switch it to `Dockerfile.blackwell` (override with `VLLM_DOCKERFILE`).
+4. Cloud-Build job downloads Llama 3.1 8B from HuggingFace using `HF_TOKEN` and uploads to `gs://<project>-model-weights/`.
+5. `terraform apply` for [`2-multikueue/`](2-multikueue/) — Kueue + JobSet + LWS + dispatcher across all clusters.
+6. `terraform apply` for [`3-multi-cluster-inference-gateway/`](3-multi-cluster-inference-gateway/) — cross-region Gateway + EPP + InferencePool + vLLM Deployment + HF Secret.
+7. Renames kubectl contexts to `mgmt` / `worker-<region>` for each cluster.
+8. Runs `demo-preemption.sh` (skip with `SKIP_DEMO=1`).
+
+Wall-clock: ~30–45 min, dominated by GKE cluster creation, vLLM image push, and weights download.
+
+**Requirements:** Owner role on the project, GPU quota in each worker region (`NVIDIA_L4_GPUS >= 8` for the happy path, or `NVIDIA_RTX_PRO_6000_GPUS >= 8` and a reservation for Blackwell), and a HuggingFace token that has accepted the [Llama 3.1 license](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct).
+
+### Layered Terraform stacks
+
+The script wraps three Terraform stacks. Each is also runnable standalone — see each stack's `README.md`.
+
+| Stack | What it provisions |
 |---|---|
-| `namespace.yaml` | `inference-server` namespace |
-| `secret.yaml` | HuggingFace token for model downloads |
-| `gpu-deployment.yaml` | vLLM Deployment + LoRA syncer sidecar + ConfigMap + Service |
-| `inferencepool.yaml` | InferencePool (`vllm-llama3-8b-instruct`) with export annotation |
-| `endpointpicker.yaml` | EPP v1.4.0 deployment with flow control, saturation detector, and scoring plugins |
-| `autoscalingmetric.yaml` | Exports `kv-cache` metric from vLLM pods to GCP |
-| `inference-objective.yaml` | Two InferenceObjectives: `food-review-prod` (priority 100) and `food-review-batch` (priority -10) |
-| `validatingadmissionpolicy.yaml` | Admission policy for the inference namespace |
+| [`1-infrastructure/`](1-infrastructure/) | GCP infrastructure: project services, proxy subnets, cluster SAs + IAM, Workload Identity bindings, multi-cluster ingress feature, GKE Standard clusters (mgmt + workers), GCS buckets (`model-weights`, `pod-snapshots`), and Artifact Registry repos (`vllm-blackwell`, `gcp-auth-plugin`). Static accelerator pools are opt-in via `static_accelerator_machine_type` (`g4-*` for Blackwell, `g2-*` for L4); the default happy path runs on NAP-driven L4. |
+| [`2-multikueue/`](2-multikueue/) | In-cluster Kueue + MultiKueue control plane via the Helm provider: Kueue, JobSet, LeaderWorkerSet operators on every cluster; demo's WorkloadPriorityClasses, ResourceFlavor, ClusterQueue, LocalQueues; AdmissionCheck, MultiKueueConfig, MultiKueueClusters, ClusterProfiles on the hub; `least-disruption-dispatcher` Deployment. |
+| [`3-multi-cluster-inference-gateway/`](3-multi-cluster-inference-gateway/) | In-cluster routing + application via Helm: cross-region Gateway, HTTPRoute + GCPBackendPolicy + HealthCheckPolicy on the hub; per-worker InferencePool, InferenceObjectives, EPP, ComputeClass, AutoscalingMetric, vLLM Deployment + HF token Secret. The HPA is intentionally not part of the chart — `demo-preemption.sh` applies `workers/hpa-inference.yaml` at demo start and removes it at cleanup so the GPU pool drains between runs. |
 
-**Management** (`mgmt/`):
+### GPU compute classes
 
-| File | What it creates |
-|---|---|
-| `namespace.yaml` | `gateway-system` and `inference-server` namespaces |
-| `gateway.yaml` | Cross-region internal gateway |
-| `httproute.yaml` | Routes to `GCPInferencePoolImport` (auto-created from worker exports) |
-| `backend-policy.yaml` | `CUSTOM_METRICS` balancing with 60% KV-cache threshold |
-| `healthcheck.yaml` | Health check policy for the backend service |
+The `inference-gpu` ComputeClass (installed by stack 3) defines the priority list the inference Deployment selects on. Default tiers:
 
-**Kueue** (`kueue/`):
+1. **L4 Spot** (NAP-driven `g2-standard-12`)
+2. **L4 on-demand** (NAP fallback when Spot capacity is unavailable)
 
-| File | What it creates |
-|---|---|
-| `priority-classes.yaml` | `inference-high` (1000), `training-low` (100), `training-critical` (2000) |
-| `resource-flavor.yaml` | `rtx-pro-6000` flavor |
-| `cluster-queue-worker.yaml` | `gpu-cluster-queue` with preemption policy (workers) |
-| `cluster-queue-mgmt.yaml` | ClusterQueue on management cluster |
-| `local-queues.yaml` | `inference-queue` and `training-queue` |
-| `namespace-training.yaml` | `training-jobs` namespace |
-| `admission-check.yaml` | MultiKueue admission check |
-| `multikueue-config.yaml` | MultiKueue configuration |
-| `multikueue-cluster-*.yaml` | MultiKueueCluster references for each worker |
-| `hpa-inference.yaml` | HPA for east1 vLLM deployment (scales on KV-cache utilization, min=2) |
-| `hpa-inference-west3.yaml` | HPA for west3 with scale-to-zero (min=0, scales on EPP flow control queue depth) |
+When `enable_blackwell_compute_class_tier=true` is set on stack 3, a Blackwell tier is prepended to match a `g4-*` static accelerator pool. `activeMigration` repacks pods back to higher-priority tiers when capacity returns.
 
 ### Building the vLLM Image
 
-The Dockerfile layers Blackwell-optimized settings on top of `vllm/vllm-openai`:
+Two example Dockerfiles ship at the repo root, each layering family-specific
+defaults on top of `vllm/vllm-openai`:
+
+| File | When to use | Notes |
+|---|---|---|
+| `Dockerfile.l4` | Happy path (NAP-driven L4) and any `g2-*` static pool | FA2 backend, no FlashInfer install. Pair with runtime args `--kv-cache-dtype fp8 --gpu-memory-utilization 0.95 --max-model-len 2048` to fit Llama 3.1 8B on 24 GB. |
+| `Dockerfile.blackwell` | `g4-*` static pool (RTX PRO 6000, sm_120) | FlashInfer attention backend, expandable_segments allocator. Bumps to higher `--max-num-seq` are safe given 96 GB VRAM. |
+
+The base image is multi-arch (sm_75–sm_120), so either build will run on the
+other family if needed; the runtime env defaults differ.
 
 ```bash
-docker build \
-  -t us-east1-docker.pkg.dev/kubecon-fleets-demo-1/vllm-blackwell/vllm-blackwell:latest .
+# L4 / happy path
+docker build -f Dockerfile.l4 \
+  -t us-east1-docker.pkg.dev/<project>/vllm-blackwell/vllm-blackwell:latest .
 
-docker push us-east1-docker.pkg.dev/kubecon-fleets-demo-1/vllm-blackwell/vllm-blackwell:latest
+# Blackwell static pool
+docker build -f Dockerfile.blackwell \
+  -t us-east1-docker.pkg.dev/<project>/vllm-blackwell/vllm-blackwell:latest .
+
+docker push us-east1-docker.pkg.dev/<project>/vllm-blackwell/vllm-blackwell:latest
 ```
+
+`scripts/install.sh` picks the right Dockerfile automatically based on
+`STATIC_ACCELERATOR_MACHINE_TYPE` (override with `VLLM_DOCKERFILE`).
 
 ### Connecting to Clusters
 
 ```bash
-gcloud container clusters get-credentials ai-worker-us-east1 \
-  --region us-east1 --project kubecon-fleets-demo-1
-
-gcloud container clusters get-credentials ai-worker-us-west3 \
-  --region us-west3 --project kubecon-fleets-demo-1
+gcloud container clusters get-credentials ai-worker-<region> \
+  --region <region> --project <project>
 ```
+
+Or use `terraform output -raw get_credentials_commands` from `1-infrastructure/` to print the full set.
 
 ## Troubleshooting
 

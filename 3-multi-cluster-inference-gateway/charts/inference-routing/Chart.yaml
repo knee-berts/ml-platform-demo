@@ -1,0 +1,5 @@
+apiVersion: v2
+name: inference-routing
+description: Worker-side inference routing infrastructure — InferencePool + InferenceObjectives + EPP + ComputeClass + AutoscalingMetric + HPA + pod-snapshot config. The vLLM Deployment itself is the application data plane and is applied separately.
+version: 0.1.0
+type: application

@@ -1,0 +1,41 @@
+# Cloud Build for the vLLM image. Builds the chosen Dockerfile at the repo
+# root and pushes to the user's vllm-blackwell AR repo (created by the
+# 1-infrastructure stack).
+#
+# Run from the repo root:
+#   gcloud builds submit . \
+#     --config 3-multi-cluster-inference-gateway/docker/vllm/cloudbuild.yaml \
+#     --substitutions=_DOCKERFILE=Dockerfile.l4 \
+#     --project=<your-project>
+#
+# Pick the Dockerfile to match your accelerator family:
+#   _DOCKERFILE=Dockerfile.l4         (default — happy path, also g2-* static pools)
+#   _DOCKERFILE=Dockerfile.blackwell  (g4-* static pools — RTX PRO 6000)
+#
+# The vllm/vllm-openai base image is multi-arch (sm_75-sm_120), so either
+# build runs on the other family if needed; the env defaults differ.
+substitutions:
+  _TAG: latest
+  _VLLM_TAG: latest
+  _DOCKERFILE: Dockerfile.l4
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - VLLM_TAG=${_VLLM_TAG}
+      - -t
+      - us-east1-docker.pkg.dev/${PROJECT_ID}/vllm-blackwell/vllm-blackwell:${_TAG}
+      - -f
+      - ${_DOCKERFILE}
+      - .
+
+images:
+  - us-east1-docker.pkg.dev/${PROJECT_ID}/vllm-blackwell/vllm-blackwell:${_TAG}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  # vLLM image is large (~10 GB), bump the disk to keep build fast.
+  diskSizeGb: 100
+  machineType: E2_HIGHCPU_8

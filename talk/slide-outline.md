@@ -162,7 +162,7 @@ scaleUp:
 ---
 
 ## SLIDES 13-15 — Demo (live or recorded)
-- Use `preemption-demo.gif` or live `demo-preemption.sh`
+- Use a live `demo-preemption.sh` run, or re-record with `record-demo.sh`
 - Narrate each act, calling out:
   - Act 1: Where the scheduling behavior is general vs. GPU-specific
   - Act 2: The high cost of preemption (minutes to recover) compared to CPU workloads

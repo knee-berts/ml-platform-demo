@@ -1,0 +1,42 @@
+{{- /*
+Default L4-only ComputeClass: spot first, then on-demand. Optionally extended
+to prefer Blackwell when blackwellEnabled=true (only useful in projects with
+Blackwell quota — the 1-infrastructure stack also gates the dedicated node
+pool on the same flag).
+*/ -}}
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: {{ .Values.computeClassName }}
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+
+  priorities:
+    {{- if .Values.blackwellEnabled }}
+    - machineType: g4-standard-48
+      gpu:
+        type: nvidia-rtx-pro-6000
+        count: 1
+        driverVersion: default
+      spot: false
+    {{- end }}
+
+    - machineType: g2-standard-12
+      gpu:
+        type: nvidia-l4
+        count: 1
+        driverVersion: default
+      spot: true
+
+    - machineType: g2-standard-12
+      gpu:
+        type: nvidia-l4
+        count: 1
+        driverVersion: default
+      spot: false
+
+  whenUnsatisfiable: ScaleUpAnyway
+
+  activeMigration:
+    optimizeRulePriority: true

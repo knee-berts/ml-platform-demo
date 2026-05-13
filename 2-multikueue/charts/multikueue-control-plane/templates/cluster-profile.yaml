@@ -1,0 +1,19 @@
+{{- /*
+Standalone ClusterProfile fallback for fleet members that don't get one
+auto-registered by fleet-clusterinventory. Mirrors clusterprofile-west3.yaml.
+The referenced name on MultiKueueCluster (clusterProfileName) must match the
+fleet-registered profile in steady state — this resource exists primarily so
+the demo can come up cleanly even if the fleet auto-registration race trails
+the Kueue install.
+*/}}
+{{- range .Values.workers }}
+---
+apiVersion: multicluster.x-k8s.io/v1alpha1
+kind: ClusterProfile
+metadata:
+  name: {{ .shortName }}
+spec:
+  clusterManager:
+    name: gke-fleet
+  displayName: {{ .displayName | quote }}
+{{- end }}

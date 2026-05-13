@@ -1,0 +1,68 @@
+inferencePoolName: vllm-llama3-8b-instruct
+inferenceNamespace: inference-server
+computeClassName: inference-gpu
+
+# Default 0: install brings up everything except inference pods (Secret,
+# ConfigMap, ServiceAccount, Service all stage). demo-preemption.sh's
+# pre-flight scales to 2; cleanup scales back to 0 so GPU pools drain.
+replicas: 0
+
+# GSA email for the Workload Identity binding annotated on the KSA. Comes
+# from the foundation stack's `inference_service_account` output. Required.
+inferenceServiceAccount: ""
+
+# vLLM image — built by 3-mcig/docker/vllm/cloudbuild.yaml.
+image: ""
+
+# Model weights path. Default points at the gs://<project>-model-weights bucket
+# created by the 1-infrastructure stack and populated by the weights-uploader
+# Cloud Build job.
+modelWeightsPath: ""
+servedModelName: meta-llama/Llama-3.1-8B-Instruct
+
+# HuggingFace API token for gated model access (Llama 3.1 is gated).
+# Pass via Terraform TF_VAR_hf_token env var; never commit a literal value here.
+hfToken: ""
+
+# Optional gvisor runtime. Default off — NAP-created nodes don't have gvisor
+# pre-installed. Set to "gvisor" only if your node pools have the gvisor
+# RuntimeClass available.
+runtimeClassName: ""
+
+terminationGracePeriodSeconds: 130
+
+# vLLM args. Defaults are tuned for L4 (24 GB VRAM). Llama 3.1 8B in bf16
+# loads at ~20.5 GiB; with --gpu-memory-utilization 0.95 that leaves ~2.3 GiB
+# for KV cache, which fp8 KV doubles to effective 4.6 GiB — enough headroom
+# for max-num-seq=16 at max-model-len=2048. Bump back up on Blackwell (96GB).
+maxNumSeq: 16
+maxModelLen: 2048
+gpuMemoryUtilization: 0.95
+enforceEager: true
+# fp8 KV cache halves KV memory at minor accuracy cost. Required on L4 for
+# 8B models; safe to leave on Blackwell. Set to "" to disable.
+kvCacheDtype: fp8
+
+vllmArgs: []
+# Example override:
+# vllmArgs:
+#   - --model
+#   - <weights path>
+#   - --enable-lora
+#   - --max-num-seq
+#   - "256"
+
+# LoRA adapter config served via the dynamic LoRA syncer sidecar.
+loraSyncerImage: registry.k8s.io/gateway-api-inference-extension/lora-syncer:v1.1.0-rc.1
+loraAdapters:
+  - id: food-review-1
+    source: Kawon/llama3.1-food-finetune_v14_r8
+maxLoras: 16
+maxLoraRank: 64
+maxCpuLoras: 32
+
+# Kueue queue + priority labels.
+kueueQueueName: inference-queue
+kueuePriorityClass: inference-high
+
+startupFailureThreshold: 600
