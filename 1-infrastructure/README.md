@@ -131,6 +131,5 @@ repo root.
 - **Static accelerator pool min = 0.** True HPA scale-to-zero isn't available
   on GKE Standard, but the *cluster autoscaler* can drain the pool once
   `delete_inference_stack` removes the HPA + Deployment between demo runs.
-  See the HPA section in the root `CLAUDE.md`.
 - **No remote backend.** Default is local state. Add a `backend "gcs"` block
   in `versions.tf` and re-`init` if you want shared state.
