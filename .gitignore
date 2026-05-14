@@ -1,14 +1,3 @@
-# Internal notes and investigation docs
-ENGINEERING_REPORT.md
-FINDINGS.md
-CUSTOM_METRICS_TROUBLESHOOTING.md
-
-# Code Assist
-GEMINI.md
-.gemini/
-CLAUDE.md
-.claude/
-
 # Recordings (cast files, gifs, agg binary)
 recordings/
 
