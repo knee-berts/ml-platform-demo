@@ -3,7 +3,9 @@ ENGINEERING_REPORT.md
 FINDINGS.md
 CUSTOM_METRICS_TROUBLESHOOTING.md
 
-# Claude Code
+# Code Assist
+GEMINI.md
+.gemini/
 CLAUDE.md
 .claude/
 
