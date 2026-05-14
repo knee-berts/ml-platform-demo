@@ -31,6 +31,7 @@ __pycache__/
 .claude/
 CLAUDE.md
 .vscode/
+.gemini/
 
 # Git internals are excluded by default but be explicit.
 .git/
