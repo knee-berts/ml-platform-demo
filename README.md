@@ -82,7 +82,7 @@ When GPUs are needed for inference scale-out, Kueue evicts training jobs first.
 
 ## Running the Demo
 
-The demo is a two-step process: first set up training jobs, then run the load test.
+The demo is a four-step process: reset state, submit training jobs, start the dashboard, then run the preemption script (which drives its own load).
 
 ### Step 1: Reset the Environment
 
@@ -115,19 +115,33 @@ This is an interactive, narrated walkthrough that:
 
 Add `--auto` for an unattended version with timed pauses (good for recordings).
 
-### Step 3: Run the Load Test + Dashboard
+### Step 3: Start the Dashboard
 
 ```bash
-python3 load_test.py --target-cluster east1 --concurrency 300
+python3 load_test.py --mode dashboard --target-cluster east1
 ```
 
-This launches load generator pods inside the target cluster and opens a live Rich dashboard showing:
+This opens a live Rich dashboard (no load generated) so you can watch what happens when the preemption demo runs in Step 4:
 
 - **Cluster panels** — Per-pod KV cache utilization bars, running/waiting request counts, fill rate, sparkline history
 - **Routing panel** — Which cluster is the load target vs. spillover destination, threshold status
 - **EPP Flow Control panel** — Per-cluster EPP queue depth bars, saturation status, active InferenceObjective and fairness IDs
 - **Kueue panel** — HPA replica counts and scaling metrics, workload table with cluster/type/status, training pod counts, and a live event log showing preemptions and rescheduling
 - **Stats panel** — Load generator target, concurrency, success/error counts, RPS
+
+Leave this running in its own terminal.
+
+> Only add `--mode both --concurrency 300` if you're demoing the inference path standalone (no preemption). For the full demo, `demo-preemption.sh` in Step 4 starts its own load tests — running an extra load generator here will skew the picture.
+
+### Step 4: Run the Preemption Demo
+
+In a second terminal:
+
+```bash
+./demo-preemption.sh
+```
+
+This narrated script drives the preemption story end-to-end. It starts and adjusts its own `load_test.py --mode load` processes against the target cluster, so the dashboard from Step 3 will light up as the demo progresses through saturation, HPA scale-out, training preemption, and rescheduling.
 
 > **Note:** All demo scripts target the `worker-east1` and `worker-central1` contexts (matching the install.sh defaults). If you override `WORKER_REGIONS` to a different second region, you'll need to patch the cluster names in `demo-reset.sh`, `demo-multikueue.sh`, `demo-preemption.sh`, and `load_test.py`.
 
@@ -153,16 +167,16 @@ As load ramps up on the target cluster:
 
 ### Dashboard Modes
 
-The dashboard can run independently of the load test:
+`load_test.py` has three modes:
 
 ```bash
-# Dashboard only — monitor clusters without generating any load
+# Dashboard only — what Step 3 uses; monitors clusters without generating load
 python3 load_test.py --mode dashboard --target-cluster east1
 
-# Load only — generate load with periodic text stats (no Rich UI)
+# Load only — what demo-preemption.sh launches internally (text stats, no Rich UI)
 python3 load_test.py --mode load --target-cluster east1 --concurrency 300
 
-# Both (default) — full experience
+# Both (default) — load + dashboard in one process; use this only when demoing the inference path standalone, not alongside demo-preemption.sh
 python3 load_test.py --mode both --target-cluster east1 --concurrency 300
 ```
 
